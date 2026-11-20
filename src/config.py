@@ -62,37 +62,51 @@ def _mock_llm_response(prompt: str, system_prompt: str) -> str:
     prompt_lower = prompt.lower()
     system_lower = system_prompt.lower()
 
-    if "instruction" in prompt_lower or "specification" in system_lower:
-        return """# Feature: Percentage Discount Vouchers
+    # 1. Test Agent
+    if "hidden evaluation" in system_lower or "test author" in system_lower or "pytest" in prompt_lower:
+        return """import unittest
+from cart import ShoppingCart
 
-## Problem Description
-The current ShoppingCart calculates total price directly from items. We need to introduce support for discount vouchers that reduce the cart's subtotal by a percentage.
+class TestVoucherFeature(unittest.TestCase):
+    def test_apply_valid_voucher(self):
+        cart = ShoppingCart()
+        cart.add_item("Shoes", 100.0, 1)
+        cart.apply_voucher("SAVE20", 20.0)
+        self.assertEqual(cart.get_total(), 80.0)
 
-## Specification & Acceptance Criteria
-- Add an `apply_voucher(code: str, discount_pct: float)` method to `ShoppingCart`.
-- `discount_pct` must be a float between 0.0 and 100.0 (inclusive).
-- Add a `get_total()` method to `ShoppingCart` that applies the active voucher discount to the subtotal.
-- If no voucher is applied, `get_total()` returns the exact subtotal.
+    def test_invalid_voucher_discount_range(self):
+        cart = ShoppingCart()
+        with self.assertRaises(ValueError):
+            cart.apply_voucher("BAD", -5.0)
+        with self.assertRaises(ValueError):
+            cart.apply_voucher("BAD", 105.0)
 
-## Edge Cases & Error Handling
-- If `discount_pct` is less than 0.0 or greater than 100.0, raise `ValueError("Discount percentage must be between 0 and 100")`.
-- If an empty string or non-string is passed for `code`, raise `ValueError("Invalid voucher code")`.
-- Applying a new voucher replaces any previously applied voucher.
-- Removing items or having an empty cart should correctly evaluate `get_total()` to 0.0.
+    def test_invalid_voucher_code(self):
+        cart = ShoppingCart()
+        with self.assertRaises(ValueError):
+            cart.apply_voucher("", 10.0)
 
-## Target Interface
-`ShoppingCart.apply_voucher(code: str, discount_pct: float) -> None`
-`ShoppingCart.get_total() -> float`
+    def test_voucher_replacement(self):
+        cart = ShoppingCart()
+        cart.add_item("Book", 50.0, 1)
+        cart.apply_voucher("SAVE10", 10.0)
+        self.assertEqual(cart.get_total(), 45.0)
+        cart.apply_voucher("SAVE50", 50.0)
+        self.assertEqual(cart.get_total(), 25.0)
+
+if __name__ == "__main__":
+    unittest.main()
 """
 
-    if "git diff" in prompt_lower or "ground-truth reference" in system_lower:
+    # 2. Coder Agent
+    if "ground-truth reference" in system_lower or "reference author" in system_lower or "unified git diff" in prompt_lower:
         return """--- a/cart.py
 +++ b/cart.py
 @@ -19,6 +19,8 @@ class ShoppingCart:
      def __init__(self):
          self.items: Dict[str, Item] = {}
-+        self.voucher_code: Optional[str] = None
-+        self.discount_pct: float = 0.0
++        self.voucher_code = None
++        self.discount_pct = 0.0
 
      def add_item(self, name: str, price: float, quantity: int = 1) -> None:
 @@ -35,6 +37,20 @@ class ShoppingCart:
@@ -117,35 +131,30 @@ The current ShoppingCart calculates total price directly from items. We need to 
          return sum(item.quantity for item in self.items.values())
 """
 
-    if "pytest" in prompt_lower or "hidden evaluation" in system_lower:
-        return """import pytest
-from cart import ShoppingCart
+    # 3. Spec Agent
+    if "specification" in system_lower or "instruction" in prompt_lower:
+        return """# Feature: Percentage Discount Vouchers
 
-def test_apply_valid_voucher():
-    cart = ShoppingCart()
-    cart.add_item("Shoes", 100.0, 1)
-    cart.apply_voucher("SAVE20", 20.0)
-    assert cart.get_total() == 80.0
+## Problem Description
+The current ShoppingCart calculates total price directly from items. We need to introduce support for discount vouchers that reduce the cart's subtotal by a percentage.
 
-def test_invalid_voucher_discount_range():
-    cart = ShoppingCart()
-    with pytest.raises(ValueError, match="Discount percentage must be between 0 and 100"):
-        cart.apply_voucher("BAD", -5.0)
-    with pytest.raises(ValueError, match="Discount percentage must be between 0 and 100"):
-        cart.apply_voucher("BAD", 105.0)
+## Specification & Acceptance Criteria
+- Add an `apply_voucher(code: str, discount_pct: float)` method to `ShoppingCart`.
+- `discount_pct` must be a float between 0.0 and 100.0 (inclusive).
+- Add a `get_total()` method to `ShoppingCart` that applies the active voucher discount to the subtotal.
+- If no voucher is applied, `get_total()` returns the exact subtotal.
 
-def test_invalid_voucher_code():
-    cart = ShoppingCart()
-    with pytest.raises(ValueError, match="Invalid voucher code"):
-        cart.apply_voucher("", 10.0)
+## Edge Cases & Error Handling
+- If `discount_pct` is less than 0.0 or greater than 100.0, raise `ValueError("Discount percentage must be between 0 and 100")`.
+- If an empty string or non-string is passed for `code`, raise `ValueError("Invalid voucher code")`.
+- Applying a new voucher replaces any previously applied voucher.
+- Removing items or having an empty cart should correctly evaluate `get_total()` to 0.0.
 
-def test_voucher_replacement():
-    cart = ShoppingCart()
-    cart.add_item("Book", 50.0, 1)
-    cart.apply_voucher("SAVE10", 10.0)
-    assert cart.get_total() == 45.0
-    cart.apply_voucher("SAVE50", 50.0)
-    assert cart.get_total() == 25.0
+## Target Interface
+`ShoppingCart.apply_voucher(code: str, discount_pct: float) -> None`
+`ShoppingCart.get_total() -> float`
 """
+
+    return "Mock response for query."
 
     return "Mock response for query."
