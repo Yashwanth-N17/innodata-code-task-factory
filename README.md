@@ -27,13 +27,13 @@ The factory is designed with a strict separation of concerns across a 4-stage pi
     ┌─────────────────────────────────────────────────────────────────────────┐
     │                       MULTI-AGENT GENERATION LOOP                       │
     │                                                                         │
-    │   [Shreya: Spec Agent]              Generates instruction.md (WHAT)     │
+    │   [Maximus: Spec Agent]             Generates instruction.md (WHAT)     │
     │             │                                                           │
     │             ▼                                                           │
     │   [Manya: Coder & Test Agent]       Generates solution.diff & Pytest    │
     │             │                                                           │
     │             ▼                                                           │
-    │   [Maximus: Verifier & Packager]    SWE-bench 3-Step Matrix & toml      │
+    │   [Shreya: Verifier & Packager]     SWE-bench 3-Step Matrix & toml      │
     └────────────────────────────────────┬────────────────────────────────────┘
                                          │
                                          ▼
@@ -125,12 +125,12 @@ python run_factory.py --repo path/to/your/repo --count 5
 
 ## 👥 Team Roles & Responsibilities
 
-| Member | Focus | Primary Files Owned |
-| :--- | :--- | :--- |
-| **Shreya** | Task Ideation & Specification | `src/analyzer.py`, `src/spec_generator.py`, `prompts/spec_system_prompt.txt` |
-| **Manya** | Code & Test Synthesis | `src/coder_agent.py`, `src/test_agent.py`, `prompts/coder_prompt.txt`, `prompts/test_prompt.txt` |
-| **Maximus** | Sandbox Verifier & Packager | `src/verifier.py`, `src/packager.py`, verification runner |
-| **Yashwant** | Variation, Benchmark & PPT Lead | `src/variation_controller.py`, `src/benchmark_evaluator.py`, Presentation Deck |
+| Member | Focus | Primary Files Owned | Role Difficulty & Scope |
+| :--- | :--- | :--- | :--- |
+| **Shreya** | **Sandbox Verifier & SWE-bench Engine** | `src/verifier.py`, `src/packager.py`, verification runner | ⭐⭐⭐ (Core Engine: 25% Validity, 3-step test matrix, patch execution) |
+| **Maximus** | Task Ideation & Specification | `src/analyzer.py`, `src/spec_generator.py`, `prompts/spec_system_prompt.txt` | ⭐⭐ (Prompt engineering & AST symbol scanning; fits busy schedule) |
+| **Manya** | Code & Test Synthesis | `src/coder_agent.py`, `src/test_agent.py`, `prompts/coder_prompt.txt`, `prompts/test_prompt.txt` | ⭐⭐⭐ (Reference code patch & Pytest assertions) |
+| **Yashwant** | Variation, Benchmark & PPT Lead | `src/variation_controller.py`, `src/benchmark_evaluator.py`, Presentation Deck | ⭐⭐ (Variation taxonomy, frontier model scoring & official PPT) |
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for Git branching rules and team workflow.
 

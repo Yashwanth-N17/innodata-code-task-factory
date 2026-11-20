@@ -10,9 +10,9 @@ To avoid Git merge conflicts and work smoothly across our 4-person team, we foll
 
 | Role / Member | Focus Area | Primary Directories / Files |
 | :--- | :--- | :--- |
-| **Shreya** | Task Ideation & Spec Generator | `src/analyzer.py`, `src/spec_generator.py`, `prompts/spec_system_prompt.txt` |
+| **Shreya** | **Sandbox Verifier & SWE-bench Engine** | `src/verifier.py`, `src/packager.py`, verification runner |
+| **Maximus** | Task Ideation & Spec Generator | `src/analyzer.py`, `src/spec_generator.py`, `prompts/spec_system_prompt.txt` |
 | **Manya** | Solution Coder & Test Author | `src/coder_agent.py`, `src/test_agent.py`, `prompts/coder_prompt.txt`, `prompts/test_prompt.txt` |
-| **Maximus** | Sandbox & SWE-bench Verifier | `src/verifier.py`, `src/packager.py`, verification runner |
 | **Yashwant** | Variation, Benchmark & PPT Lead | `src/variation_controller.py`, `src/benchmark_evaluator.py`, official PPT deck & video |
 
 ---
