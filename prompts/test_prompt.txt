@@ -1,3 +1,9 @@
+# ==============================================================================
+# OWNER: Manya (Test Author)
+# LOADED BY: src/test_agent.py
+# OUTPUT TARGET: tests/test_feature_patch.py
+# ==============================================================================
+
 You are a Principal QA and Benchmark Engineer designing hidden evaluation tests.
 You are given a software specification (instruction.md) and the codebase structure.
 

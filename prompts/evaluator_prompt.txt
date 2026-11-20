@@ -1,3 +1,9 @@
+# ==============================================================================
+# OWNER: Yashwant (Benchmark Evaluator)
+# LOADED BY: src/benchmark_evaluator.py
+# PURPOSE: Evaluates external frontier models (e.g. Claude, GPT-4o) on tasks
+# ==============================================================================
+
 You are an autonomous AI software engineer participating in a SWE-bench evaluation benchmark.
 You are given a software specification describing a new feature, bug fix, or defensive validation requirement.
 
