@@ -17,38 +17,25 @@ To avoid Git merge conflicts and work smoothly across our 4-person team, we foll
 
 ---
 
-## 2. Git Branching Strategy
+## 2. Standard Pull Request (PR) Workflow
 
-Never push directly to `main`! Always work on your designated feature branch.
-
-### Designated Team Feature Branches:
-* **Shreya:** `feature/shreya-spec-generator`
-* **Manya:** `feature/manya-code-test-synth`
-* **Maximus:** `feature/maximus-sandbox-verifier`
-* **Yashwant:** `feature/yashwant-variation-benchmark`
-
-### Step-by-Step Git Workflow:
-
-1. **Clone the repository:**
+To contribute:
+1. Clone the repository:
    ```bash
    git clone https://github.com/shrey159/innodata-code-task-factory.git
    cd innodata-code-task-factory
    ```
-
-2. **Switch to your assigned feature branch:**
+2. Create your own working branch:
    ```bash
-   # For Shreya:
-   git checkout feature/shreya-spec-generator
-
-   # For Manya:
-   git checkout feature/manya-code-test-synth
-
-   # For Maximus:
-   git checkout feature/maximus-sandbox-verifier
-
-   # For Yashwant:
-   git checkout feature/yashwant-variation-benchmark
+   git checkout -b my-feature
    ```
+3. Commit and push your changes:
+   ```bash
+   git add .
+   git commit -m "feat: description of work"
+   git push origin my-feature
+   ```
+4. Open a **Pull Request (PR)** on GitHub into `main` for review and merge.
 
 3. **Make your changes, test them, and stage:**
    ```bash
