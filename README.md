@@ -115,7 +115,7 @@ cp .env.example .env
 ### 3. Run the Factory
 ```bash
 # Offline demo run (zero API credits required):
-python run_factory.py --repo sample_repo --mock --count 2
+python run_factory.py --repo path/to/your/repo --mock --count 2
 
 # Production run using live Gemini or OpenAI APIs:
 python run_factory.py --repo path/to/your/repo --count 5

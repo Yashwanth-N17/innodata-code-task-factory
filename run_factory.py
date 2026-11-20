@@ -26,8 +26,8 @@ def main():
     parser.add_argument(
         "--repo",
         type=str,
-        default="sample_repo",
-        help="Path to the target codebase repository",
+        required=True,
+        help="Path to the target codebase repository to benchmark",
     )
     parser.add_argument(
         "--output",

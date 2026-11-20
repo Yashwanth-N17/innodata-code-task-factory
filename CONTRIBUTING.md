@@ -31,7 +31,7 @@ To ensure everyone can work smoothly without blocking each other or causing Git 
   > Specify **WHAT** needs to be built (business goals, inputs/outputs, edge cases). **NEVER give away HOW** (no implementation code, no line numbers).
 * **How to Test Your Code Independently:**
   ```bash
-  python -c "from src.analyzer import CodebaseAnalyzer; from src.spec_generator import SpecGenerator; ctx = CodebaseAnalyzer('sample_repo').get_context_prompt(); print(SpecGenerator().generate(ctx))"
+  python -c "from src.analyzer import CodebaseAnalyzer; from src.spec_generator import SpecGenerator; ctx = CodebaseAnalyzer('src').get_context_prompt(); print(SpecGenerator().generate(ctx))"
   ```
 
 ---
@@ -68,7 +68,7 @@ To ensure everyone can work smoothly without blocking each other or causing Git 
   3. **Positive Check:** Repo + `solution.diff` + all tests $\rightarrow$ **PASS** (`PASS_TO_PASS` verified)
 * **How to Test Your Code Independently:**
   ```bash
-  python run_factory.py --repo sample_repo --mock --count 1
+  python -m unittest discover tests
   ```
 
 ---
@@ -111,11 +111,11 @@ To contribute code without conflicts:
 
 3. **Make your changes & test locally:**
    ```bash
-   # Run mock pipeline
-   python run_factory.py --repo sample_repo --mock --count 1
-
    # Run unit tests
    python -m unittest discover tests
+
+   # Test factory against any target repository
+   python run_factory.py --repo path/to/target/repo --mock --count 1
    ```
 
 4. **Commit and push to GitHub:**
