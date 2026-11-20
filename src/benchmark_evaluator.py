@@ -11,10 +11,16 @@ from .config import call_llm
 
 
 class BenchmarkEvaluator:
-    def __init__(self, task_dir: str, target_repo_path: str):
+    def __init__(self, task_dir: str, target_repo_path: str, prompt_template_path: str = None):
         self.task_dir = os.path.abspath(task_dir)
         self.target_repo_path = os.path.abspath(target_repo_path)
         self.verifier = SandboxVerifier(target_repo_path)
+        if not prompt_template_path:
+            prompt_template_path = os.path.join(
+                os.path.dirname(__file__), "..", "prompts", "evaluator_prompt.txt"
+            )
+        with open(prompt_template_path, "r", encoding="utf-8") as f:
+            self.eval_prompt_template = f.read()
 
     def evaluate_model(self, model_name: str = "claude-3-5-sonnet") -> Dict[str, Any]:
         """Evaluate an AI model against this task package."""
@@ -28,10 +34,10 @@ class BenchmarkEvaluator:
             test_code = f.read()
 
         # Step 1: Prompt the target model with instruction.md
-        prompt = f"""You are an autonomous AI coding agent. Implement the feature described in this specification:
-{instruction_md}
+        prompt = f"""{self.eval_prompt_template}
 
-Output ONLY a unified git diff against the codebase.
+Task Specification (instruction.md):
+{instruction_md}
 """
         agent_diff = call_llm(prompt=prompt)
 
