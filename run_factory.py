@@ -64,7 +64,7 @@ def main():
     print("=" * 65)
 
     # 1. Initialize Pipeline Agents
-    print("\n[Phase 1] Initializing Pipeline & Scanning Codebase (Member 1)...")
+    print("\n[Phase 1] Initializing Pipeline & Scanning Codebase (Shreya)...")
     analyzer = CodebaseAnalyzer(repo_path)
     context = analyzer.get_context_prompt()
     print(f" Scanned Codebase Summary:\n{context}")
@@ -86,19 +86,19 @@ def main():
         print(f"\n[Phase 2.{idx}] Generating Task #{idx}: {cat['name']}")
         print(f" Archetype: {cat['description']}")
 
-        # Member 1: Spec
-        print("  -> Member 1: Generating specification (instruction.md)...")
+        # Shreya: Spec
+        print("  -> Shreya: Generating specification (instruction.md)...")
         instruction_md = spec_gen.generate(codebase_context=context, category=cat["id"])
 
-        # Member 2: Reference Code & Tests
-        print("  -> Member 2: Generating reference solution (solution.diff)...")
+        # Manya: Reference Code & Tests
+        print("  -> Manya: Generating reference solution (solution.diff)...")
         solution_diff = coder.generate_diff(codebase_context=context, instruction_md=instruction_md)
 
-        print("  -> Member 2: Generating pytest test suite (test_patch.py)...")
+        print("  -> Manya: Generating pytest test suite (test_patch.py)...")
         test_code = tester.generate_tests(codebase_context=context, instruction_md=instruction_md)
 
-        # Member 3: Verification
-        print("  -> Member 3: Running SWE-bench 3-Step Verification Matrix...")
+        # Maximus: Verification
+        print("  -> Maximus: Running SWE-bench 3-Step Verification Matrix...")
         verification = verifier.verify(solution_diff=solution_diff, test_code=test_code)
 
         print(f"     [1] Baseline Existing Tests: {'PASS' if verification.step1_baseline_pass else 'FAIL'}")
@@ -115,10 +115,10 @@ def main():
             test_code=test_code,
             verification=verification,
         )
-        print(f"  -> Member 3: Packaged into: {package_dir}")
+        print(f"  -> Maximus: Packaged into: {package_dir}")
         verified_tasks.append((task_id, verification.is_valid))
 
-    # 3. Final Summary & Member 4 Variation Report
+    # 3. Final Summary & Yashwant Variation Report
     print("\n" + "=" * 65)
     print(" 📊 FACTORY EXECUTION SUMMARY")
     print("=" * 65)
@@ -127,7 +127,7 @@ def main():
         print(f" • {tid}: {status_str}")
 
     var_report = variation_ctrl.get_variation_report()
-    print("\n[Phase 3] Meaningful Variation Report (Member 4):")
+    print("\n[Phase 3] Meaningful Variation Report (Yashwant):")
     print(f" Diversity Score : {var_report['diversity_score'] * 100}%")
     print(f" Distribution    : {var_report['distribution']}")
     print("=" * 65)

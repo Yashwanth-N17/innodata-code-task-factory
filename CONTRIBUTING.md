@@ -8,12 +8,12 @@ To avoid Git merge conflicts and work smoothly across our 4-person team, we foll
 
 ## 1. Team Role Assignments
 
-| Role | Member Name | Focus Area | Primary Directories / Files |
-| :--- | :--- | :--- | :--- |
-| **Member 1** | TBD | Task Ideation & Spec Generator | `src/analyzer.py`, `src/spec_generator.py`, `prompts/spec_system_prompt.txt` |
-| **Member 2** | TBD | Solution Coder & Test Author | `src/coder_agent.py`, `src/test_agent.py`, `prompts/coder_prompt.txt`, `prompts/test_prompt.txt` |
-| **Member 3** | TBD | Sandbox & SWE-bench Verifier | `src/verifier.py`, `src/packager.py`, verification runner |
-| **Member 4** | TBD | Variation, Benchmark & PPT Lead | `src/variation_controller.py`, `src/benchmark_evaluator.py`, official PPT deck & video |
+| Role / Member | Focus Area | Primary Directories / Files |
+| :--- | :--- | :--- |
+| **Shreya** | Task Ideation & Spec Generator | `src/analyzer.py`, `src/spec_generator.py`, `prompts/spec_system_prompt.txt` |
+| **Manya** | Solution Coder & Test Author | `src/coder_agent.py`, `src/test_agent.py`, `prompts/coder_prompt.txt`, `prompts/test_prompt.txt` |
+| **Maximus** | Sandbox & SWE-bench Verifier | `src/verifier.py`, `src/packager.py`, verification runner |
+| **Yashwant** | Variation, Benchmark & PPT Lead | `src/variation_controller.py`, `src/benchmark_evaluator.py`, official PPT deck & video |
 
 ---
 
@@ -21,23 +21,33 @@ To avoid Git merge conflicts and work smoothly across our 4-person team, we foll
 
 Never push directly to `main`! Always work on your designated feature branch.
 
-### Branch Names:
-* Member 1: `feature/member-1-spec-generator`
-* Member 2: `feature/member-2-code-test-synth`
-* Member 3: `feature/member-3-sandbox-verifier`
-* Member 4: `feature/member-4-variation-benchmark`
+### Designated Team Feature Branches:
+* **Shreya:** `feature/shreya-spec-generator`
+* **Manya:** `feature/manya-code-test-synth`
+* **Maximus:** `feature/maximus-sandbox-verifier`
+* **Yashwant:** `feature/yashwant-variation-benchmark`
 
 ### Step-by-Step Git Workflow:
 
 1. **Clone the repository:**
    ```bash
-   git clone <YOUR_GITHUB_REPO_URL>
+   git clone https://github.com/shrey159/innodata-code-task-factory.git
    cd innodata-code-task-factory
    ```
 
-2. **Create and switch to your feature branch:**
+2. **Switch to your assigned feature branch:**
    ```bash
-   git checkout -b feature/member-1-spec-generator
+   # For Shreya:
+   git checkout feature/shreya-spec-generator
+
+   # For Manya:
+   git checkout feature/manya-code-test-synth
+
+   # For Maximus:
+   git checkout feature/maximus-sandbox-verifier
+
+   # For Yashwant:
+   git checkout feature/yashwant-variation-benchmark
    ```
 
 3. **Make your changes, test them, and stage:**

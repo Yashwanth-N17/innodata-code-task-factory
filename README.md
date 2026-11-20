@@ -27,25 +27,20 @@ The factory is designed with a strict separation of concerns across a 4-stage pi
     ┌─────────────────────────────────────────────────────────────────────────┐
     │                       MULTI-AGENT GENERATION LOOP                       │
     │                                                                         │
-    │   [Member 1: Spec Agent]            Generates instruction.md (WHAT)     │
+    │   [Shreya: Spec Agent]              Generates instruction.md (WHAT)     │
     │             │                                                           │
     │             ▼                                                           │
-    │   [Member 2: Coder Agent]           Generates solution.diff             │
-    │   [Member 2: Test Agent]            Generates pytest test_patch.py      │
+    │   [Manya: Coder & Test Agent]       Generates solution.diff & Pytest    │
     │             │                                                           │
     │             ▼                                                           │
-    │   [Member 3: Verifier]              SWE-bench 3-Step Validation Matrix  │
-    │             │                                                           │
-    │             ▼                                                           │
-    │   [Member 3: Packager]              Standardized task.toml Package      │
+    │   [Maximus: Verifier & Packager]    SWE-bench 3-Step Matrix & toml      │
     └────────────────────────────────────┬────────────────────────────────────┘
                                          │
                                          ▼
     ┌─────────────────────────────────────────────────────────────────────────┐
     │                    EVALUATION & BENCHMARKING ENGINE                     │
     │                                                                         │
-    │   [Member 4: Variation Controller]  Multi-Dimensional Task Diversity    │
-    │   [Member 4: Benchmark Evaluator]   Frontier AI Scoring & Analytics     │
+    │   [Yashwant: Variation & Benchmark] Task Diversity & Frontier AI Eval   │
     └─────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -130,12 +125,12 @@ python run_factory.py --repo path/to/your/repo --count 5
 
 ## 👥 Team Roles & Responsibilities
 
-| Role | Focus | Primary Files Owned |
+| Member | Focus | Primary Files Owned |
 | :--- | :--- | :--- |
-| **Member 1** | Task Ideation & Specification | `src/analyzer.py`, `src/spec_generator.py`, `prompts/spec_system_prompt.txt` |
-| **Member 2** | Code & Test Synthesis | `src/coder_agent.py`, `src/test_agent.py`, `prompts/coder_prompt.txt`, `prompts/test_prompt.txt` |
-| **Member 3** | Sandbox Verifier & Packager | `src/verifier.py`, `src/packager.py`, verification runner |
-| **Member 4** | Variation, Benchmark & PPT Lead | `src/variation_controller.py`, `src/benchmark_evaluator.py`, Presentation Deck |
+| **Shreya** | Task Ideation & Specification | `src/analyzer.py`, `src/spec_generator.py`, `prompts/spec_system_prompt.txt` |
+| **Manya** | Code & Test Synthesis | `src/coder_agent.py`, `src/test_agent.py`, `prompts/coder_prompt.txt`, `prompts/test_prompt.txt` |
+| **Maximus** | Sandbox Verifier & Packager | `src/verifier.py`, `src/packager.py`, verification runner |
+| **Yashwant** | Variation, Benchmark & PPT Lead | `src/variation_controller.py`, `src/benchmark_evaluator.py`, Presentation Deck |
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for Git branching rules and team workflow.
 
