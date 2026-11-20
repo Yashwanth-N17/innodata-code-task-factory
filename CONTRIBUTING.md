@@ -19,44 +19,37 @@ To avoid Git merge conflicts and work smoothly across our 4-person team, we foll
 
 ## 2. Standard Pull Request (PR) Workflow
 
-To contribute:
-1. Clone the repository:
+1. **Clone the repository:**
    ```bash
    git clone https://github.com/shrey159/innodata-code-task-factory.git
    cd innodata-code-task-factory
    ```
-2. Create your own working branch:
+
+2. **Create a new branch for your task:**
    ```bash
-   git checkout -b my-feature
+   git checkout -b feature/my-update
    ```
-3. Commit and push your changes:
+
+3. **Make your changes, test them locally:**
+   ```bash
+   # Run the mock pipeline to verify
+   python run_factory.py --repo sample_repo --mock --count 1
+
+   # Run unit tests
+   python -m unittest discover tests
+   ```
+
+4. **Commit and push to your branch:**
    ```bash
    git add .
-   git commit -m "feat: description of work"
-   git push origin my-feature
-   ```
-4. Open a **Pull Request (PR)** on GitHub into `main` for review and merge.
-
-3. **Make your changes, test them, and stage:**
-   ```bash
-   git add src/spec_generator.py
-   git commit -m "feat(spec): add AST symbol parser and requirement prompt"
+   git commit -m "feat(module): description of changes"
+   git push origin feature/my-update
    ```
 
-4. **Keep your branch updated with main:**
-   ```bash
-   git fetch origin
-   git rebase origin/main
-   ```
-
-5. **Push your branch to GitHub:**
-   ```bash
-   git push -u origin feature/member-1-spec-generator
-   ```
-
-6. **Create a Pull Request (PR) on GitHub:**
-   * Open GitHub, click "Compare & pull request".
-   * Ask at least one teammate to review and click "Merge".
+5. **Open a Pull Request on GitHub:**
+   * Go to [github.com/shrey159/innodata-code-task-factory](https://github.com/shrey159/innodata-code-task-factory).
+   * Click **Compare & pull request** against `main`.
+   * Have a team member review and merge.
 
 ---
 

@@ -64,7 +64,7 @@ def main():
     print("=" * 65)
 
     # 1. Initialize Pipeline Agents
-    print("\n[Phase 1] Initializing Pipeline & Scanning Codebase (Maximus)...")
+    print("\n[Phase 1] Initializing Pipeline & Scanning Codebase...")
     analyzer = CodebaseAnalyzer(repo_path)
     context = analyzer.get_context_prompt()
     print(f" Scanned Codebase Summary:\n{context}")
@@ -86,26 +86,26 @@ def main():
         print(f"\n[Phase 2.{idx}] Generating Task #{idx}: {cat['name']}")
         print(f" Archetype: {cat['description']}")
 
-        # Maximus: Spec
-        print("  -> Maximus: Generating specification (instruction.md)...")
+        # Step A: Specification
+        print("  -> Generating specification (instruction.md)...")
         instruction_md = spec_gen.generate(codebase_context=context, category=cat["id"])
 
-        # Manya: Reference Code & Tests
-        print("  -> Manya: Generating reference solution (solution.diff)...")
+        # Step B: Reference Code & Tests
+        print("  -> Generating reference solution (solution.diff)...")
         solution_diff = coder.generate_diff(codebase_context=context, instruction_md=instruction_md)
 
-        print("  -> Manya: Generating pytest test suite (test_patch.py)...")
+        print("  -> Generating pytest test suite (test_patch.py)...")
         test_code = tester.generate_tests(codebase_context=context, instruction_md=instruction_md)
 
-        # Shreya: Verification
-        print("  -> Shreya: Running SWE-bench 3-Step Verification Matrix...")
+        # Step C: Verification
+        print("  -> Running SWE-bench 3-Step Verification Matrix...")
         verification = verifier.verify(solution_diff=solution_diff, test_code=test_code)
 
         print(f"     [1] Baseline Existing Tests: {'PASS' if verification.step1_baseline_pass else 'FAIL'}")
         print(f"     [2] Negative Check (Fail-to-Pass): {'FAIL (Verified)' if verification.step2_negative_fail else 'PASS (Invalid: False Positive)'}")
         print(f"     [3] Positive Check (Pass-to-Pass): {'PASS' if verification.step3_positive_pass else 'FAIL'}")
 
-        # Packaging
+        # Step D: Packaging
         package_dir = packager.package(
             task_id=task_id,
             repo_name=os.path.basename(repo_path),
@@ -115,10 +115,10 @@ def main():
             test_code=test_code,
             verification=verification,
         )
-        print(f"  -> Shreya: Packaged into: {package_dir}")
+        print(f"  -> Packaged into: {package_dir}")
         verified_tasks.append((task_id, verification.is_valid))
 
-    # 3. Final Summary & Yashwant Variation Report
+    # 3. Final Summary & Variation Report
     print("\n" + "=" * 65)
     print(" 📊 FACTORY EXECUTION SUMMARY")
     print("=" * 65)
@@ -127,7 +127,7 @@ def main():
         print(f" • {tid}: {status_str}")
 
     var_report = variation_ctrl.get_variation_report()
-    print("\n[Phase 3] Meaningful Variation Report (Yashwant):")
+    print("\n[Phase 3] Meaningful Variation Report:")
     print(f" Diversity Score : {var_report['diversity_score'] * 100}%")
     print(f" Distribution    : {var_report['distribution']}")
     print("=" * 65)
