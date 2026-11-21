@@ -1,11 +1,14 @@
 """
-Member 3: Task Packager.
+Feature 6: Standardized Task Packager.
 Standardizes and saves verified tasks into SWE-bench compliant task packages:
 - task.toml
 - instruction.md
 - solution/solution.diff
 - tests/test_feature_patch.py
 - validation_report.json
+
+Input: Task artifacts, repo metadata, and verification audit results.
+Output: Standardized directory on disk under tasks/<task_id>/.
 """
 
 import json

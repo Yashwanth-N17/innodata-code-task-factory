@@ -1,7 +1,10 @@
 """
-Member 2: Test Author Agent.
-Generates a rigorous pytest test suite (`test_patch.py`) that fails before
-the feature is implemented and passes once the reference solution is applied.
+Feature 4: Hidden Acceptance Test Synthesizer.
+Generates an isolated pytest test suite (`test_patch.py`) that strictly enforces
+the fail-to-pass guarantee (fails on unmodified repo, passes with reference solution applied).
+
+Input: Codebase context + instruction.md specification.
+Output: Valid Python pytest file content.
 """
 
 import os
@@ -31,8 +34,36 @@ The tests MUST fail against the current unpatched codebase, and pass once implem
 Return ONLY valid Python pytest code.
 """
         raw_output = call_llm(prompt=user_prompt, system_prompt=self.system_prompt)
+        return self._clean_test_output(raw_output)
 
-        # Clean markdown code blocks if the LLM wrapped it in ```python ... ```
+    def repair_tests(
+        self,
+        codebase_context: str,
+        instruction_md: str,
+        previous_tests: str,
+        error_message: str,
+    ) -> str:
+        """Self-Correction Feedback Loop: Fix test suite syntax errors or invalid imports."""
+        repair_prompt = f"""Codebase Context:
+{codebase_context}
+
+Task Specification:
+{instruction_md}
+
+Previous Test File:
+{previous_tests}
+
+The test execution failed with the following error:
+{error_message}
+
+Please provide a corrected pytest test file. Ensure imports match the codebase accurately.
+Return ONLY valid Python pytest code.
+"""
+        raw_output = call_llm(prompt=repair_prompt, system_prompt=self.system_prompt)
+        return self._clean_test_output(raw_output)
+
+    @staticmethod
+    def _clean_test_output(raw_output: str) -> str:
         cleaned = raw_output.strip()
         if cleaned.startswith("```python"):
             cleaned = cleaned[len("```python"):].strip()
@@ -40,5 +71,4 @@ Return ONLY valid Python pytest code.
             cleaned = cleaned[len("```"):].strip()
         if cleaned.endswith("```"):
             cleaned = cleaned[:-len("```")].strip()
-
-        return cleaned
+        return cleaned.strip()

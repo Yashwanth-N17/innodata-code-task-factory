@@ -1,5 +1,5 @@
 # ==============================================================================
-# OWNER: Yashwant (Benchmark Evaluator)
+# FEATURE: Feature 8 - Frontier AI Benchmark Evaluator
 # LOADED BY: src/benchmark_evaluator.py
 # PURPOSE: Evaluates external frontier models (e.g. Claude, GPT-4o) on tasks
 # ==============================================================================

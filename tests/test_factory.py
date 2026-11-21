@@ -57,6 +57,28 @@ class PaymentProcessor:
         self.assertIn("Specification & Acceptance Criteria", spec)
         self.assertIn("Edge Cases", spec)
 
+    def test_spec_leakage_detector_and_sanitizer(self):
+        bad_spec = "Please modify calculate_discount around line 45 to check if self._active is True."
+        is_valid, warnings = SpecGenerator.validate_leakage(bad_spec)
+        self.assertFalse(is_valid)
+        self.assertGreater(len(warnings), 0)
+
+        cleaned = SpecGenerator.sanitize_spec(bad_spec)
+        self.assertNotIn("line 45", cleaned)
+
+    def test_coder_and_test_agent_self_healing(self):
+        from src.coder_agent import CoderAgent
+        from src.test_agent import TestAgent
+        coder = CoderAgent()
+        tester = TestAgent()
+        
+        # Verify repair methods exist and return strings
+        diff = coder.repair_diff(codebase_context="ctx", instruction_md="spec", previous_diff="diff", error_message="err")
+        self.assertTrue(isinstance(diff, str))
+
+        tests = tester.repair_tests(codebase_context="ctx", instruction_md="spec", previous_tests="tests", error_message="err")
+        self.assertTrue(isinstance(tests, str))
+
 
 if __name__ == "__main__":
     unittest.main()

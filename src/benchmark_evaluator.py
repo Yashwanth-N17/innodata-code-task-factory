@@ -1,7 +1,10 @@
 """
-Member 4: Frontier AI Benchmark Evaluator.
-Hands generated `instruction.md` to a target AI model, captures its output patch,
-and evaluates whether the model passes the hidden test suite.
+Feature 8: Frontier AI Benchmark Evaluation Harness.
+Hands generated `instruction.md` to a target external AI model (e.g. Claude 3.5 Sonnet, GPT-4o),
+captures its output patch, and evaluates whether the model passes the hidden test suite in the sandbox.
+
+Input: Packaged task directory + target model identifier.
+Output: Evaluation audit dictionary containing solve rate and test logs.
 """
 
 import os

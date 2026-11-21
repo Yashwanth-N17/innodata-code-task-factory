@@ -1,12 +1,15 @@
 """
-Member 1: Codebase Analyzer.
-Crawls a target repository, parses Python AST to extract classes, functions,
-docstrings, and existing test suites without running arbitrary code.
+Feature 1: Codebase Semantic Scanner & AST Symbol Extractor.
+Crawls a target repository and parses Python AST trees to extract classes, public functions,
+docstrings, imports, and existing test suites without executing arbitrary code.
+
+Input: Target repository directory path.
+Output: Structured dictionary of symbols + formatted context summary string.
 """
 
 import ast
 import os
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 
 
 class CodebaseAnalyzer:
@@ -20,6 +23,7 @@ class CodebaseAnalyzer:
             "files": [],
             "classes": [],
             "functions": [],
+            "imports": [],
             "existing_tests": [],
         }
 
@@ -46,7 +50,14 @@ class CodebaseAnalyzer:
                 node = ast.parse(f.read(), filename=rel_path)
 
             for item in node.body:
-                if isinstance(item, ast.ClassDef):
+                if isinstance(item, (ast.Import, ast.ImportFrom)):
+                    if isinstance(item, ast.Import):
+                        for n in item.names:
+                            summary["imports"].append(n.name)
+                    else:
+                        if item.module:
+                            summary["imports"].append(item.module)
+                elif isinstance(item, ast.ClassDef):
                     methods = [m.name for m in item.body if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))]
                     summary["classes"].append({
                         "file": rel_path,
@@ -60,9 +71,38 @@ class CodebaseAnalyzer:
                         "name": item.name,
                         "docstring": ast.get_docstring(item) or "",
                     })
-        except Exception as e:
+        except Exception:
             # Skip unparseable files
             pass
+
+    def get_file_content(self, rel_path: str) -> Optional[str]:
+        """Retrieve full source code of a file within the repository."""
+        full_path = os.path.join(self.repo_path, rel_path)
+        if os.path.exists(full_path) and os.path.isfile(full_path):
+            with open(full_path, "r", encoding="utf-8") as f:
+                return f.read()
+        return None
+
+    def get_primary_target(self) -> Dict[str, Any]:
+        """Return the primary target class or module to benchmark."""
+        scan_data = self.scan()
+        if scan_data["classes"]:
+            target_cls = scan_data["classes"][0]
+            content = self.get_file_content(target_cls["file"])
+            return {
+                "file": target_cls["file"],
+                "class_name": target_cls["name"],
+                "content": content or "",
+            }
+        elif scan_data["files"]:
+            target_file = scan_data["files"][0]
+            content = self.get_file_content(target_file)
+            return {
+                "file": target_file,
+                "class_name": "Module",
+                "content": content or "",
+            }
+        return {"file": "main.py", "class_name": "App", "content": ""}
 
     def get_context_prompt(self) -> str:
         """Format the parsed symbols into a prompt-friendly text summary."""

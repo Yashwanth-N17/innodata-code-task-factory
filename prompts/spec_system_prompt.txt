@@ -1,5 +1,5 @@
 # ==============================================================================
-# OWNER: Maximus (Task Ideation & Spec Generator)
+# FEATURE: Feature 2 - SWE-bench Issue Specification Generator
 # LOADED BY: src/spec_generator.py
 # OUTPUT TARGET: instruction.md
 # ==============================================================================

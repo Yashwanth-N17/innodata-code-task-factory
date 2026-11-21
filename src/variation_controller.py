@@ -1,7 +1,14 @@
 """
-Member 4: Meaningful Variation Controller.
+Feature 7: Meaningful Variation & Taxonomy Controller.
 Prevents trivial task generation (e.g. changing button colors) by enforcing
-a multi-dimensional task taxonomy covering distinct engineering challenges.
+a multi-dimensional task taxonomy covering distinct engineering challenges:
+1. New Functional Feature
+2. Defensive Validation & Error Handling
+3. Concurrency & State Mutation Bug Fix
+4. Algorithmic Refactor & Optimization
+
+Input: Requested batch count of tasks.
+Output: Balanced category distribution and mathematical diversity metrics.
 """
 
 from typing import List, Dict, Any
