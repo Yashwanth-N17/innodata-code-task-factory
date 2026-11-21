@@ -1,6 +1,10 @@
 """
-Member 2: Reference Coder Agent.
-Generates the ground-truth solution implementation formatted as a unified Git diff (`solution.diff`).
+Feature 3: Ground-Truth Reference Coder & Self-Repair Agent.
+Generates the reference solution formatted strictly as a unified Git diff (`solution.diff`).
+Includes an iterative self-repair loop to fix rejected patches or test failures.
+
+Input: Codebase context + instruction.md specification.
+Output: Valid unified Git diff patch string.
 """
 
 import os
@@ -29,8 +33,36 @@ Please generate the reference implementation that satisfies this specification.
 Return ONLY the unified git diff patch.
 """
         raw_output = call_llm(prompt=user_prompt, system_prompt=self.system_prompt)
-        
-        # Clean markdown code blocks if the LLM wrapped it in ```diff ... ```
+        return self._clean_diff_output(raw_output)
+
+    def repair_diff(
+        self,
+        codebase_context: str,
+        instruction_md: str,
+        previous_diff: str,
+        error_message: str,
+    ) -> str:
+        """Self-Correction Feedback Loop: Request LLM to fix a failed patch or test failure."""
+        repair_prompt = f"""Codebase Context:
+{codebase_context}
+
+Task Specification:
+{instruction_md}
+
+Previous Solution Diff:
+{previous_diff}
+
+The above solution failed during sandbox verification with the following error:
+{error_message}
+
+Please analyze the failure and provide a corrected unified git diff that resolves the issue and passes all tests.
+Return ONLY the corrected unified git diff patch.
+"""
+        raw_output = call_llm(prompt=repair_prompt, system_prompt=self.system_prompt)
+        return self._clean_diff_output(raw_output)
+
+    @staticmethod
+    def _clean_diff_output(raw_output: str) -> str:
         cleaned = raw_output.strip()
         if cleaned.startswith("```diff"):
             cleaned = cleaned[len("```diff"):].strip()
@@ -38,5 +70,4 @@ Return ONLY the unified git diff patch.
             cleaned = cleaned[len("```"):].strip()
         if cleaned.endswith("```"):
             cleaned = cleaned[:-len("```")].strip()
-
-        return cleaned
+        return cleaned.strip()

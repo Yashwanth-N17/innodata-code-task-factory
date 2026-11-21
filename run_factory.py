@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Main Entry Point: Automated Coding Task Factory.
-Orchestrates Member 1, 2, 3, and 4 pipelines into an end-to-end repeatable system.
+Orchestrates Features 1 through 7 into an end-to-end repeatable benchmark generation pipeline.
 """
 
 import argparse
@@ -97,9 +97,30 @@ def main():
         print("  -> Generating pytest test suite (test_patch.py)...")
         test_code = tester.generate_tests(codebase_context=context, instruction_md=instruction_md)
 
-        # Step C: Verification
+        # Step C: Verification with Self-Correction Retry Loop
         print("  -> Running SWE-bench 3-Step Verification Matrix...")
         verification = verifier.verify(solution_diff=solution_diff, test_code=test_code)
+
+        # Self-Correction Loop (Up to 2 repair iterations)
+        max_repairs = 2
+        repair_attempt = 0
+        while not verification.is_valid and repair_attempt < max_repairs:
+            repair_attempt += 1
+            if not verification.patch_applied_cleanly:
+                err_msg = verification.logs.get("patch_application", "Patch failed to apply.")
+                print(f"     [Self-Healing] Patch failure detected. Requesting CoderAgent repair ({repair_attempt}/{max_repairs})...")
+                solution_diff = coder.repair_diff(codebase_context=context, instruction_md=instruction_md, previous_diff=solution_diff, error_message=err_msg)
+            elif not verification.step3_positive_pass:
+                err_msg = verification.logs.get("step3_positive_check", "Tests failed.")
+                print(f"     [Self-Healing] Step 3 test failure detected. Requesting CoderAgent repair ({repair_attempt}/{max_repairs})...")
+                solution_diff = coder.repair_diff(codebase_context=context, instruction_md=instruction_md, previous_diff=solution_diff, error_message=err_msg)
+            elif not verification.step2_negative_fail:
+                err_msg = "Negative check failed: tests passed on unpatched code (false positive)."
+                print(f"     [Self-Healing] Test validity failure detected. Requesting TestAgent repair ({repair_attempt}/{max_repairs})...")
+                test_code = tester.repair_tests(codebase_context=context, instruction_md=instruction_md, previous_tests=test_code, error_message=err_msg)
+
+            print(f"     -> Re-verifying repaired artifacts (Attempt {repair_attempt})...")
+            verification = verifier.verify(solution_diff=solution_diff, test_code=test_code)
 
         print(f"     [1] Baseline Existing Tests: {'PASS' if verification.step1_baseline_pass else 'FAIL'}")
         print(f"     [2] Negative Check (Fail-to-Pass): {'FAIL (Verified)' if verification.step2_negative_fail else 'PASS (Invalid: False Positive)'}")
