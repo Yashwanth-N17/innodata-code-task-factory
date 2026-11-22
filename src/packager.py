@@ -46,12 +46,16 @@ class TaskPackager:
         with open(os.path.join(task_dir, "instruction.md"), "w", encoding="utf-8") as f:
             f.write(instruction_md)
 
-        # 2. Write solution.diff
+        # 2. Write solution.diff (in solution/ and at task root)
         with open(os.path.join(solution_dir, "solution.diff"), "w", encoding="utf-8") as f:
             f.write(solution_diff)
+        with open(os.path.join(task_dir, "solution.diff"), "w", encoding="utf-8") as f:
+            f.write(solution_diff)
 
-        # 3. Write tests/test_feature_patch.py
+        # 3. Write tests/test_feature_patch.py and root test_patch.py
         with open(os.path.join(tests_dir, "test_feature_patch.py"), "w", encoding="utf-8") as f:
+            f.write(test_code)
+        with open(os.path.join(task_dir, "test_patch.py"), "w", encoding="utf-8") as f:
             f.write(test_code)
 
         # 4. Write task.toml
@@ -72,10 +76,12 @@ pass_to_pass = ["tests/"]
         with open(os.path.join(task_dir, "task.toml"), "w", encoding="utf-8") as f:
             f.write(toml_content)
 
-        # 5. Write validation_report.json (Proof for judges)
+        # 5. Write validation_report.json and metadata.json
         report = {
             "task_id": task_id,
+            "repo_name": repo_name,
             "category": category,
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
             "status": "VERIFIED" if verification.is_valid else "FAILED_VERIFICATION",
             "checks": {
                 "step1_baseline_pass": verification.step1_baseline_pass,
@@ -83,9 +89,19 @@ pass_to_pass = ["tests/"]
                 "step3_positive_pass": verification.step3_positive_pass,
                 "patch_applied_cleanly": verification.patch_applied_cleanly,
             },
+            "environment": {
+                "python_version": ">=3.9",
+                "test_command": "pytest tests/test_feature_patch.py",
+            },
+            "evaluation": {
+                "fail_to_pass": list(verification.fail_to_pass),
+                "pass_to_pass": list(verification.pass_to_pass),
+            },
             "logs": verification.logs,
         }
         with open(os.path.join(task_dir, "validation_report.json"), "w", encoding="utf-8") as f:
+            json.dump(report, f, indent=2)
+        with open(os.path.join(task_dir, "metadata.json"), "w", encoding="utf-8") as f:
             json.dump(report, f, indent=2)
 
         return task_dir

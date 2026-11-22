@@ -70,4 +70,4 @@ Return ONLY the corrected unified git diff patch.
             cleaned = cleaned[len("```"):].strip()
         if cleaned.endswith("```"):
             cleaned = cleaned[:-len("```")].strip()
-        return cleaned.strip()
+        return (cleaned.strip() + "\n") if cleaned.strip() else ""

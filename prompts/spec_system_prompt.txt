@@ -21,6 +21,8 @@ CRITICAL RULES:
 3. STRUCTURE YOUR OUTPUT IN CLEAN MARKDOWN:
    - # Task Title
    - ## Problem Description
+   - ## Business Requirements
+   - ## Input & Output Schema
    - ## Specification & Acceptance Criteria
-   - ## Edge Cases & Error Handling
+   - ## Edge Cases & Error Handling (must specify at least 3 concrete edge cases)
    - ## Target Interface (Public API signature only)

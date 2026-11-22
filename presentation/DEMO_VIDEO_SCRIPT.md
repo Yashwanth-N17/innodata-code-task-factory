@@ -23,8 +23,8 @@
 * **Speaker (Yashwant):**  
   > "Let's see the factory in action. We run `python run_factory.py`.
   > Notice what happens under the hood:
-  > First, our Codebase Scanner parses the AST to inspect classes and existing tests.
-  > Next, our Specification Agent writes `instruction.md` following strict SWE-bench rules—it specifies WHAT to build with edge cases, never giving away the code.
+  > First, our Codebase Scanner parses the AST to inspect classes, base hierarchies, and full method signatures with parameter annotations and public/private separation.
+  > Next, our Specification Agent writes `instruction.md` following strict SWE-bench rules—specifying business requirements, I/O schemas, and at least 3 concrete edge cases, with our automated leakage auditor guaranteeing zero line numbers or private internal variables are revealed.
   > Then, our Code and Test Synthesis agents generate the reference `solution.diff` and the hidden pytest assertions.
   > Finally, our Sandbox Verifier runs the rigorous 3-step matrix:
   > Step 1: Baseline tests PASS.

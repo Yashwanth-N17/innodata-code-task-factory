@@ -44,9 +44,13 @@ To ensure anyone can contribute and build features **concurrently without blocki
 
 ### 🛠️ Feature 1: Codebase Semantic Scanner & AST Symbol Extractor
 * **Module:** `src/analyzer.py`
-* **Purpose:** Crawl a target repository and parse Python AST trees to extract classes, public method signatures, docstrings, imports, and existing test suites without executing arbitrary code.
+* **Purpose:** Crawl a target repository and parse Python AST trees without executing arbitrary code:
+  * **Accurate Test Suite Classification:** Separates actual test suites (`tests/`, `test_*.py`) from source files containing 'test' (e.g. `src/test_agent.py`).
+  * **AST Method Signatures:** Extracts full signatures including parameters, defaults, type annotations, and return types.
+  * **Public vs. Private Separation:** Distinguishes public API methods from internal/private methods (`_` prefix).
+  * **Class Hierarchy & Inheritance:** Captures base classes (`bases`) and class inheritance graphs.
 * **Input Received:** Target repository directory path.
-* **Output Produced:** Structured dictionary of symbols + formatted context summary string.
+* **Output Produced:** Structured dictionary of symbols (`files`, `classes`, `bases`, `public_methods`, `private_methods`, `class_hierarchy`, `existing_tests`) + formatted context summary string.
 * **How to Test Independently:**
   ```bash
   python -c "from src.analyzer import CodebaseAnalyzer; print(CodebaseAnalyzer('src').get_context_prompt())"
@@ -56,9 +60,13 @@ To ensure anyone can contribute and build features **concurrently without blocki
 
 ### 🛠️ Feature 2: SWE-bench Issue Specification & Leakage Auditor
 * **Modules:** `src/spec_generator.py`, `prompts/spec_system_prompt.txt`
-* **Purpose:** Generate realistic GitHub-issue-style problem specifications defining **WHAT** needs to be built (business requirements, I/O schemas, $\ge 3$ edge cases), with automated auditing to strip line numbers and implementation exposure.
+* **Purpose:** Generate realistic GitHub-issue-style problem specifications defining **WHAT** needs to be built with full SWE-bench structure:
+  * **Required Sections:** `# Task Title`, `## Problem Description`, `## Business Requirements`, `## Input & Output Schema`, `## Specification & Acceptance Criteria`, `## Edge Cases & Error Handling` ($\ge 3$ concrete edge cases), and `## Target Interface`.
+  * **Multi-Pattern Leakage Auditor (`validate_leakage`):** Scans for explicit line references (`line \d+`, `lines \d+-\d+`, `file.py:\d+`, `L\d+`) and private member leaks (`self._...`, `_func()`).
+  * **Idempotent Sanitizer (`sanitize_spec`):** Automatically redacts line numbers and replaces internal private variables with `[internal]`, guaranteeing roundtrip validity (`validate_leakage(sanitize_spec(text))[0] == True`).
+  * **Structural Validation (`validate_structure`, `extract_edge_cases`):** Programmatically asserts required section presence and $\ge 3$ edge cases.
 * **Input Received:** Codebase context summary + category archetype.
-* **Output Produced:** Validated `instruction.md` Markdown string.
+* **Output Produced:** Clean, validated, and sanitized `instruction.md` Markdown string.
 * **Crucial Rule:** Describe WHAT must be built. Never reveal HOW (no line numbers, no private internal variables).
 * **How to Test Independently:**
   ```bash
