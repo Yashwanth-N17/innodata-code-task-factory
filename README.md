@@ -48,12 +48,14 @@ The factory is designed with a strict separation of concerns across a 4-stage pi
 
 ## 🎯 Core Engineering Principles
 
-### 1. Specification: "WHAT" to Build, Never "HOW" (`instruction.md`)
-Following SWE-bench standards, `instruction.md` is formatted as a real-world software issue ticket. It defines:
-* Business requirements and user goals.
-* Precise input/output schemas and public interface contracts.
-* Minimum 3 edge cases and defensive exception guarantees.
-* **Strict Prohibition:** Never reveals line numbers, code snippets, or implementation steps.
+### 1. AST Semantic Scanning & SWE-bench Specification: "WHAT" to Build, Never "HOW"
+* **Codebase Semantic Scanner (`src/analyzer.py`):**
+  * Statically crawls the codebase using Python `ast` without executing arbitrary code.
+  * Discovers classes, class inheritance (`bases`), public method signatures (parameters, defaults, return types), docstrings, and imports while strictly separating internal/private methods (`_` prefix).
+  * Accurately distinguishes test suites (`tests/`, `test_*.py`) from source files containing 'test' (e.g., `src/test_agent.py`).
+* **SWE-bench Issue Specification (`instruction.md`):**
+  * Formatted as a real-world software issue ticket: Business Requirements, Input/Output Schemas, Acceptance Criteria, and at least 3 concrete Edge Cases.
+  * **Automated Multi-Pattern Leakage Auditor (`validate_leakage` & `sanitize_spec`):** Automatically detects and redacts explicit line numbers (`line \d+`, `file.py:\d+`, `L\d+`) and private variable hints (`self._...`), guaranteeing zero implementation leakage.
 
 ### 2. The 3-Step Verification Matrix (Validity Evidence - 25%)
 Every generated task must pass our automated quality gate before packaging:

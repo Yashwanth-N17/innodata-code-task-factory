@@ -71,4 +71,4 @@ Return ONLY valid Python pytest code.
             cleaned = cleaned[len("```"):].strip()
         if cleaned.endswith("```"):
             cleaned = cleaned[:-len("```")].strip()
-        return cleaned.strip()
+        return (cleaned.strip() + "\n") if cleaned.strip() else ""

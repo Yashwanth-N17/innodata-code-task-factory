@@ -1,10 +1,23 @@
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
 
 from src.verifier import SandboxVerifier
+
+
+def _pytest_available() -> bool:
+    try:
+        res = subprocess.run(
+            [sys.executable, "-m", "pytest", "--version"],
+            capture_output=True,
+            text=True,
+        )
+        return res.returncode == 0
+    except Exception:
+        return False
 
 MODIFY = """--- a/mod.py
 +++ b/mod.py
@@ -100,6 +113,7 @@ BREAKING_DIFF = """--- a/calc.py
 NEW_TEST = "from calc import sub\n\ndef test_sub():\n    assert sub(5, 2) == 3\n"
 
 
+@unittest.skipUnless(_pytest_available(), "pytest is not installed in the python environment")
 class FullMatrixTests(unittest.TestCase):
     def _toy_repo(self):
         repo = tempfile.mkdtemp()

@@ -26,10 +26,14 @@ This document maps our project directly to the mandatory Hack2skill submission p
 ### Slide 3: Multi-Agent System Architecture
 * Visual diagram of the 4-stage pipeline:
   1. *Codebase Scanner & Spec Agent* (`src/analyzer.py`, `src/spec_generator.py`)
+     * **Enriched AST Extraction:** Discovers classes, inheritance hierarchies (`bases`), and complete method signatures (parameters, defaults, type annotations, return types) with clean public/private separation.
+     * **Accurate Test Separation:** Eliminates false positives, strictly isolating test suites from source modules.
   2. *Code & Test Synthesis Agent* (`src/coder_agent.py`, `src/test_agent.py`)
   3. *Sandbox Verifier & Packager* (`src/verifier.py`, `src/packager.py`)
   4. *Variation & Benchmarking Controller* (`src/variation_controller.py`, `src/benchmark_evaluator.py`)
-* Strict enforcement of **"WHAT to build, never HOW"** in `instruction.md`.
+* Strict enforcement of **"WHAT to build, never HOW"** in `instruction.md`:
+  * Standard 7-section SWE-bench contract including Business Requirements, I/O Schemas, and $\ge 3$ Edge Cases.
+  * **Automated Multi-Pattern Leakage Auditor:** Eliminates line numbers (`line \d+`, `file.py:\d+`, `L\d+`) and redacts private members to `[internal]`.
 
 ---
 

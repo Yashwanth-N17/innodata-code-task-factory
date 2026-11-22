@@ -132,14 +132,24 @@ if __name__ == "__main__":
 ## Problem Description
 The `{target_cls}` in `{target_file}` needs enhanced state validation and optional discount/voucher handling to support safe execution and boundary checks.
 
+## Business Requirements
+- Ensure `{target_cls}` maintains robust internal integrity through explicit validation mechanisms.
+- Provide secure discount voucher application protecting against invalid or fraudulent percentage values.
+- Maintain non-breaking backward compatibility with existing initialization workflows.
+
+## Input & Output Schema
+- `validate_state()`: Takes no arguments, returns boolean (`bool`) representing state validity.
+- `apply_voucher(code: str, discount_pct: float)`: Accepts string `code` and float `discount_pct`, returns `None`.
+
 ## Specification & Acceptance Criteria
 - Add state validation support (`validate_state() -> bool`) to `{target_cls}`.
 - Support voucher discount configuration with defensive exception guarantees.
 - Ensure all boundary cases return predictable exceptions rather than silent failures.
 
 ## Edge Cases & Error Handling
-- Invalid or empty code parameters must raise `ValueError("Invalid voucher code")`.
-- Numerical percentages out of range (0.0 to 100.0) must raise `ValueError`.
+- Invalid or empty code parameters (e.g. empty string or whitespace) must raise `ValueError("Invalid voucher code")`.
+- Numerical percentages out of range (less than 0.0 or greater than 100.0) must raise `ValueError`.
+- Non-string code parameters or non-numeric discount values must raise defensive type exceptions (`ValueError` or `TypeError`).
 
 ## Target Interface
 `{target_cls}.validate_state() -> bool`
