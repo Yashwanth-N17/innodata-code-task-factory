@@ -39,6 +39,74 @@ Return ONLY the unified git diff patch.
 
         return cleaned
 
+    def repair_diff(self, codebase_context: str, instruction_md: str,
+                    rejected_diff: str, error_feedback: str,
+                    max_retries: int = 3) -> str:
+        """Repair a rejected unified git diff using bounded retry attempts.
+
+        Every retry uses the original codebase context and instructions,
+        the rejected diff, and the latest error feedback. The LLM is asked
+        to correct the patch. The repaired output is cleaned and validated
+        using the same structural checks as generate_diff().
+
+        Does NOT execute the generated patch — execution remains the
+        verifier's responsibility. Structural validation (file headers,
+        hunk structure) is distinct from actual fail-to-pass verification.
+
+        Args:
+            codebase_context: Original repository context.
+            instruction_md: Original feature specification.
+            rejected_diff: The diff that was previously rejected.
+            error_feedback: Explanation of why the diff was rejected.
+            max_retries: Maximum number of repair attempts (bounded).
+
+        Returns:
+            A valid unified git diff string.
+
+        Raises:
+            ValueError: If all repair attempts are exhausted without
+                producing a valid diff.
+        """
+        for attempt in range(max_retries):
+            repair_prompt = f"""Codebase Context:
+{codebase_context}
+
+Task Specification (instruction.md):
+{instruction_md}
+
+The following unified git diff was previously rejected:
+
+{rejected_diff}
+
+Reason for rejection:
+{error_feedback}
+
+Please correct the patch so that it is a valid unified git diff that
+applies cleanly with `git apply`. Return ONLY the corrected unified git diff patch.
+"""
+            raw_output = call_llm(prompt=repair_prompt, system_prompt=self.system_prompt)
+            cleaned = self._clean_markdown_fences(raw_output)
+
+            try:
+                self._validate_diff(cleaned)
+                return cleaned
+            except ValueError:
+                if attempt == max_retries - 1:
+                    raise ValueError(
+                        f"CoderAgent failed to produce a valid unified git diff "
+                        f"after {max_retries} repair attempts. Last error: {error_feedback}"
+                    )
+                # Continue to next retry with the same context and latest error feedback.
+                error_feedback = (
+                    f"Previous repair attempt {attempt + 1} still produced an invalid diff. "
+                    f"{error_feedback}"
+                )
+
+        raise ValueError(
+            f"CoderAgent failed to produce a valid unified git diff "
+            f"after {max_retries} repair attempts."
+        )
+
     @staticmethod
     def _clean_markdown_fences(raw_output: str) -> str:
         """Remove surrounding Markdown code fences from the LLM response.

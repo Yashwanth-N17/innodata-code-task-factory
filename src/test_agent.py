@@ -42,6 +42,75 @@ Return ONLY valid Python pytest code.
 
         return cleaned
 
+    def repair_tests(self, codebase_context: str, instruction_md: str,
+                     rejected_tests: str, error_feedback: str,
+                     max_retries: int = 3) -> str:
+        """Repair rejected Python test code using bounded retry attempts.
+
+        Every retry uses the original codebase context and instructions,
+        the rejected test code, and the latest error feedback. The LLM is
+        asked to correct the tests. The repaired output is cleaned and
+        validated using the same checks as generate_tests().
+
+        Does NOT execute the generated tests — execution remains the
+        verifier's responsibility. AST/syntax validation is distinct
+        from actual fail-to-pass verification; this method does not claim
+        that AST validation proves test correctness.
+
+        Args:
+            codebase_context: Original repository context.
+            instruction_md: Original feature specification.
+            rejected_tests: The test code that was previously rejected.
+            error_feedback: Explanation of why the tests were rejected.
+            max_retries: Maximum number of repair attempts (bounded).
+
+        Returns:
+            A valid Python test code string.
+
+        Raises:
+            ValueError: If all repair attempts are exhausted without
+                producing valid test code.
+        """
+        for attempt in range(max_retries):
+            repair_prompt = f"""Codebase Context:
+{codebase_context}
+
+Task Specification (instruction.md):
+{instruction_md}
+
+The following Python test code was previously rejected:
+
+{rejected_tests}
+
+Reason for rejection:
+{error_feedback}
+
+Please correct the test code so that it is valid Python with recognizable
+test definitions (test_ functions or unittest.TestCase classes). Return
+ONLY the corrected Python test code.
+"""
+            raw_output = call_llm(prompt=repair_prompt, system_prompt=self.system_prompt)
+            cleaned = self._clean_markdown_fences(raw_output)
+
+            try:
+                self._validate_test_code(cleaned)
+                return cleaned
+            except ValueError:
+                if attempt == max_retries - 1:
+                    raise ValueError(
+                        f"TestAgent failed to produce valid Python test code "
+                        f"after {max_retries} repair attempts. Last error: {error_feedback}"
+                    )
+                error_feedback = (
+                    f"Previous repair attempt {attempt + 1} still produced invalid test code. "
+                    f"{error_feedback}"
+                )
+
+        raise ValueError(
+            f"TestAgent failed to produce valid Python test code "
+            f"after {max_retries} repair attempts."
+        )
+
     @staticmethod
     def _clean_markdown_fences(raw_output: str) -> str:
         """Remove surrounding Markdown code fences from the LLM response.
