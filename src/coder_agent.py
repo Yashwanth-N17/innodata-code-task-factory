@@ -1,6 +1,11 @@
+
 """
-Member 2: Reference Coder Agent.
-Generates the ground-truth solution implementation formatted as a unified Git diff (`solution.diff`).
+Feature 3: Ground-Truth Reference Coder & Self-Repair Agent.
+Generates the reference solution formatted strictly as a unified Git diff (`solution.diff`).
+Includes an iterative self-repair loop to fix rejected patches or test failures.
+
+Input: Codebase context + instruction.md specification.
+Output: Valid unified Git diff patch string.
 """
 
 import os
@@ -15,11 +20,13 @@ class CoderAgent:
             prompt_template_path = os.path.join(
                 os.path.dirname(__file__), "..", "prompts", "coder_prompt.txt"
             )
+
         with open(prompt_template_path, "r", encoding="utf-8") as f:
             self.system_prompt = f.read()
 
     def generate_diff(self, codebase_context: str, instruction_md: str) -> str:
         """Generate unified git diff reference solution."""
+
         user_prompt = f"""Codebase Context:
 {codebase_context}
 
@@ -29,45 +36,40 @@ Task Specification (instruction.md):
 Please generate the reference implementation that satisfies this specification.
 Return ONLY the unified git diff patch.
 """
-        raw_output = call_llm(prompt=user_prompt, system_prompt=self.system_prompt)
 
-        # Strip surrounding Markdown code fences without touching patch contents.
+        raw_output = call_llm(
+            prompt=user_prompt,
+            system_prompt=self.system_prompt
+        )
+
+        # Strip surrounding Markdown code fences.
         cleaned = self._clean_markdown_fences(raw_output)
 
-        # Validate that the result looks like a real unified git diff.
+        # Validate the generated diff.
         self._validate_diff(cleaned)
 
         return cleaned
 
-    def repair_diff(self, codebase_context: str, instruction_md: str,
-                    rejected_diff: str, error_feedback: str,
-                    max_retries: int = 3) -> str:
-        """Repair a rejected unified git diff using bounded retry attempts.
+    def repair_diff(
+        self,
+        codebase_context: str,
+        instruction_md: str,
+        rejected_diff: str,
+        error_feedback: str,
+        max_retries: int = 3,
+    ) -> str:
+        """
+        Repair a rejected unified git diff using bounded retry attempts.
 
         Every retry uses the original codebase context and instructions,
-        the rejected diff, and the latest error feedback. The LLM is asked
-        to correct the patch. The repaired output is cleaned and validated
-        using the same structural checks as generate_diff().
+        the rejected diff, and the latest error feedback.
 
-        Does NOT execute the generated patch — execution remains the
-        verifier's responsibility. Structural validation (file headers,
-        hunk structure) is distinct from actual fail-to-pass verification.
-
-        Args:
-            codebase_context: Original repository context.
-            instruction_md: Original feature specification.
-            rejected_diff: The diff that was previously rejected.
-            error_feedback: Explanation of why the diff was rejected.
-            max_retries: Maximum number of repair attempts (bounded).
-
-        Returns:
-            A valid unified git diff string.
-
-        Raises:
-            ValueError: If all repair attempts are exhausted without
-                producing a valid diff.
+        Structural validation is performed on every repaired output.
+        Actual patch execution and testing remain the verifier's responsibility.
         """
+
         for attempt in range(max_retries):
+
             repair_prompt = f"""Codebase Context:
 {codebase_context}
 
@@ -82,25 +84,33 @@ Reason for rejection:
 {error_feedback}
 
 Please correct the patch so that it is a valid unified git diff that
-applies cleanly with `git apply`. Return ONLY the corrected unified git diff patch.
+applies cleanly with `git apply`.
+
+Return ONLY the corrected unified git diff patch.
 """
-            raw_output = call_llm(prompt=repair_prompt, system_prompt=self.system_prompt)
+
+            raw_output = call_llm(
+                prompt=repair_prompt,
+                system_prompt=self.system_prompt
+            )
+
             cleaned = self._clean_markdown_fences(raw_output)
 
             try:
                 self._validate_diff(cleaned)
                 return cleaned
-            except ValueError:
+
+            except ValueError as exc:
+
+                # Pass the actual validation failure to the next retry.
+                error_feedback = str(exc)
+
                 if attempt == max_retries - 1:
                     raise ValueError(
                         f"CoderAgent failed to produce a valid unified git diff "
-                        f"after {max_retries} repair attempts. Last error: {error_feedback}"
-                    )
-                # Continue to next retry with the same context and latest error feedback.
-                error_feedback = (
-                    f"Previous repair attempt {attempt + 1} still produced an invalid diff. "
-                    f"{error_feedback}"
-                )
+                        f"after {max_retries} repair attempts. "
+                        f"Last error: {error_feedback}"
+                    ) from exc
 
         raise ValueError(
             f"CoderAgent failed to produce a valid unified git diff "
@@ -109,63 +119,81 @@ applies cleanly with `git apply`. Return ONLY the corrected unified git diff pat
 
     @staticmethod
     def _clean_markdown_fences(raw_output: str) -> str:
-        """Remove surrounding Markdown code fences from the LLM response.
-
-        Handles fences with or without a language label (e.g. ```diff,
-        ```patch, ```). Only removes fences that wrap the entire response;
-        the actual patch contents are never modified.
         """
+        Remove surrounding Markdown code fences without modifying
+        the actual unified diff contents.
+        """
+
         cleaned = raw_output.lstrip()
 
-        # Match a fully fenced block: ```lang ... ``` (content captured in group 2).
+        # Match a fully fenced code block.
         fence_pattern = r"^```(\w+)?\n(.*?)\n```\s*$"
+
         match = re.match(fence_pattern, cleaned, re.DOTALL)
+
         if match:
             return match.group(2)
 
-        # Fallback: strip a leading fence line and/or trailing fence line
-        # when they appear independently (non-standard wrapping).
-        # keepends=True preserves line terminators so trailing newlines survive.
+        # Fallback for non-standard fence formatting.
         lines = cleaned.splitlines(keepends=True)
+
         start = 0
         end = len(lines)
+
         if start < end and lines[start].startswith("```"):
             start += 1
+
         if start < end and lines[end - 1].strip() == "```":
             end -= 1
+
         return "".join(lines[start:end])
 
     @staticmethod
     def _validate_diff(diff_text: str) -> None:
-        """Validate that the response looks like a unified git diff.
-
-        Raises ValueError with a useful message if the response is empty,
-        contains only explanatory text, or lacks unified diff indicators.
         """
+        Validate that the response looks like a unified git diff.
+
+        Raises ValueError if the response is empty, contains
+        explanatory text instead of a patch, or lacks diff structure.
+        """
+
         if not diff_text or not diff_text.strip():
             raise ValueError(
-                "CoderAgent returned an empty response. The LLM did not produce "
-                "a unified git diff patch."
+                "CoderAgent returned an empty response. "
+                "The LLM did not produce a unified git diff patch."
             )
 
-        # Unified diff file headers: --- a/... and +++ b/...
-        has_minus_header = re.search(r"^--- ", diff_text, re.MULTILINE) is not None
-        has_plus_header = re.search(r"^\+\+\+ ", diff_text, re.MULTILINE) is not None
+        # Unified diff file headers.
+        has_minus_header = re.search(
+            r"^--- ",
+            diff_text,
+            re.MULTILINE
+        ) is not None
 
-        # Hunk header: @@ -start,count +start,count @@
+        has_plus_header = re.search(
+            r"^\+\+\+ ",
+            diff_text,
+            re.MULTILINE
+        ) is not None
+
+        # Unified diff hunk header.
         has_hunk = re.search(
-            r"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@", diff_text, re.MULTILINE
+            r"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@",
+            diff_text,
+            re.MULTILINE
         ) is not None
 
         if not has_minus_header or not has_plus_header:
             raise ValueError(
-                "CoderAgent response does not appear to be a valid unified git diff. "
-                "Missing '--- ' and/or '+++ ' file headers. "
-                "The LLM may have returned explanatory text instead of a patch."
+                "CoderAgent response does not appear to be a valid "
+                "unified git diff. Missing '--- ' and/or '+++ ' "
+                "file headers. The LLM may have returned explanatory "
+                "text instead of a patch."
             )
 
         if not has_hunk:
             raise ValueError(
-                "CoderAgent response contains file headers but no hunk headers "
-                "(@@ ... @@). The response may be incomplete or malformed."
+                "CoderAgent response contains file headers but no "
+                "hunk headers (@@ ... @@). The response may be "
+                "incomplete or malformed."
             )

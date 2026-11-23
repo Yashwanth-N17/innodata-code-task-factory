@@ -1,5 +1,5 @@
 # ==============================================================================
-# OWNER: Manya (Test Author)
+# FEATURE: Feature 4 - Hidden Acceptance Test Synthesizer
 # LOADED BY: src/test_agent.py
 # OUTPUT TARGET: tests/test_feature_patch.py
 # ==============================================================================

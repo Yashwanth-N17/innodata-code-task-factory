@@ -1,5 +1,5 @@
 # ==============================================================================
-# OWNER: Manya (Solution Coder)
+# FEATURE: Feature 3 - Ground-Truth Reference Solution Coder
 # LOADED BY: src/coder_agent.py
 # OUTPUT TARGET: solution/solution.diff
 # ==============================================================================

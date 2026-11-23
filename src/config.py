@@ -1,13 +1,17 @@
 """
-Configuration and Unified LLM Provider.
-Supports: 'gemini', 'openai', and 'mock' (for local testing without API keys).
+Feature 9: Unified LLM Provider & Dynamic Mock Service.
+Supports: 'gemini', 'openai', and 'mock' (dynamic mock engine for rapid local testing without API keys).
 """
 
 import os
+import re
 from typing import Optional
-from dotenv import load_dotenv
 
-load_dotenv()
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 
 class Config:
@@ -58,103 +62,98 @@ def call_llm(prompt: str, system_prompt: str = "") -> str:
 
 
 def _mock_llm_response(prompt: str, system_prompt: str) -> str:
-    """Deterministic mock responses for rapid local offline testing."""
+    """Dynamic mock responses adapting to the scanned repository for rapid local offline testing."""
     prompt_lower = prompt.lower()
     system_lower = system_prompt.lower()
 
-    # 1. Test Agent
-    if "hidden evaluation" in system_lower or "test author" in system_lower or "pytest" in prompt_lower:
-        return """import unittest
-from cart import ShoppingCart
+    # Detect target file and class from prompt if available
+    file_match = re.search(r"in ([a-zA-Z0-9_\-/]+\.py)", prompt)
+    target_file = file_match.group(1) if file_match else "service.py"
 
-class TestVoucherFeature(unittest.TestCase):
-    def test_apply_valid_voucher(self):
-        cart = ShoppingCart()
-        cart.add_item("Shoes", 100.0, 1)
-        cart.apply_voucher("SAVE20", 20.0)
-        self.assertEqual(cart.get_total(), 80.0)
+    cls_match = re.search(r"class ([a-zA-Z0-9_]+)", prompt)
+    target_cls = cls_match.group(1) if cls_match else "PaymentProcessor"
 
-    def test_invalid_voucher_discount_range(self):
-        cart = ShoppingCart()
+    # Strip directory prefix for module import (e.g. src/utils.py -> utils)
+    module_name = os.path.splitext(os.path.basename(target_file))[0]
+
+    # 1. Test Agent (Check for test author / QA / pytest first)
+    if any(k in system_lower for k in ["qa and benchmark", "test author", "designing hidden evaluation", "test_agent"]) or "return only valid python pytest code" in prompt_lower:
+        return f"""import unittest
+try:
+    from {module_name} import {target_cls}
+except ImportError:
+    import sys
+    sys.path.insert(0, ".")
+    from {module_name} import {target_cls}
+
+class TestFeatureValidation(unittest.TestCase):
+    def test_feature_execution(self):
+        try:
+            obj = {target_cls}(".")
+        except Exception:
+            obj = {target_cls}()
+        self.assertTrue(hasattr(obj, "validate_state") and obj.validate_state())
+
+    def test_feature_boundary(self):
+        try:
+            obj = {target_cls}(".")
+        except Exception:
+            obj = {target_cls}()
         with self.assertRaises(ValueError):
-            cart.apply_voucher("BAD", -5.0)
-        with self.assertRaises(ValueError):
-            cart.apply_voucher("BAD", 105.0)
-
-    def test_invalid_voucher_code(self):
-        cart = ShoppingCart()
-        with self.assertRaises(ValueError):
-            cart.apply_voucher("", 10.0)
-
-    def test_voucher_replacement(self):
-        cart = ShoppingCart()
-        cart.add_item("Book", 50.0, 1)
-        cart.apply_voucher("SAVE10", 10.0)
-        self.assertEqual(cart.get_total(), 45.0)
-        cart.apply_voucher("SAVE50", 50.0)
-        self.assertEqual(cart.get_total(), 25.0)
+            obj.apply_voucher("", -1.0)
 
 if __name__ == "__main__":
     unittest.main()
 """
 
     # 2. Coder Agent
-    if "ground-truth reference" in system_lower or "reference author" in system_lower or "unified git diff" in prompt_lower:
-        return """--- a/cart.py
-+++ b/cart.py
-@@ -19,6 +19,8 @@ class ShoppingCart:
-     def __init__(self):
-         self.items: Dict[str, Item] = {}
-+        self.voucher_code = None
-+        self.discount_pct = 0.0
-
-     def add_item(self, name: str, price: float, quantity: int = 1) -> None:
-@@ -35,6 +37,20 @@ class ShoppingCart:
-     def get_subtotal(self) -> float:
-         return sum(item.total() for item in self.items.values())
-
+    if any(k in system_lower for k in ["coder_agent", "ground-truth reference author", "solution/solution.diff"]) or "unified git diff" in prompt_lower:
+        return f"""--- a/{target_file}
++++ b/{target_file}
+@@ -10,6 +10,18 @@
++    def validate_state(self) -> bool:
++        \"\"\"Validate internal state integrity.\"\"\"
++        return True
++
 +    def apply_voucher(self, code: str, discount_pct: float) -> None:
++        \"\"\"Apply discount voucher code.\"\"\"
 +        if not isinstance(code, str) or not code.strip():
 +            raise ValueError("Invalid voucher code")
 +        if not (0.0 <= discount_pct <= 100.0):
 +            raise ValueError("Discount percentage must be between 0 and 100")
 +        self.voucher_code = code.strip()
 +        self.discount_pct = float(discount_pct)
-+
-+    def get_total(self) -> float:
-+        subtotal = self.get_subtotal()
-+        if self.discount_pct > 0.0:
-+            return subtotal * (1.0 - (self.discount_pct / 100.0))
-+        return subtotal
-+
-     def item_count(self) -> int:
-         return sum(item.quantity for item in self.items.values())
 """
 
     # 3. Spec Agent
-    if "specification" in system_lower or "instruction" in prompt_lower:
-        return """# Feature: Percentage Discount Vouchers
+    if any(k in system_lower for k in ["spec_generator", "specification designer", "task ideation", "instruction.md"]) or "task category request" in prompt_lower:
+        return f"""# Feature: State Integrity & Voucher Validation
 
 ## Problem Description
-The current ShoppingCart calculates total price directly from items. We need to introduce support for discount vouchers that reduce the cart's subtotal by a percentage.
+The `{target_cls}` in `{target_file}` needs enhanced state validation and optional discount/voucher handling to support safe execution and boundary checks.
+
+## Business Requirements
+- Ensure `{target_cls}` maintains robust internal integrity through explicit validation mechanisms.
+- Provide secure discount voucher application protecting against invalid or fraudulent percentage values.
+- Maintain non-breaking backward compatibility with existing initialization workflows.
+
+## Input & Output Schema
+- `validate_state()`: Takes no arguments, returns boolean (`bool`) representing state validity.
+- `apply_voucher(code: str, discount_pct: float)`: Accepts string `code` and float `discount_pct`, returns `None`.
 
 ## Specification & Acceptance Criteria
-- Add an `apply_voucher(code: str, discount_pct: float)` method to `ShoppingCart`.
-- `discount_pct` must be a float between 0.0 and 100.0 (inclusive).
-- Add a `get_total()` method to `ShoppingCart` that applies the active voucher discount to the subtotal.
-- If no voucher is applied, `get_total()` returns the exact subtotal.
+- Add state validation support (`validate_state() -> bool`) to `{target_cls}`.
+- Support voucher discount configuration with defensive exception guarantees.
+- Ensure all boundary cases return predictable exceptions rather than silent failures.
 
 ## Edge Cases & Error Handling
-- If `discount_pct` is less than 0.0 or greater than 100.0, raise `ValueError("Discount percentage must be between 0 and 100")`.
-- If an empty string or non-string is passed for `code`, raise `ValueError("Invalid voucher code")`.
-- Applying a new voucher replaces any previously applied voucher.
-- Removing items or having an empty cart should correctly evaluate `get_total()` to 0.0.
+- Invalid or empty code parameters (e.g. empty string or whitespace) must raise `ValueError("Invalid voucher code")`.
+- Numerical percentages out of range (less than 0.0 or greater than 100.0) must raise `ValueError`.
+- Non-string code parameters or non-numeric discount values must raise defensive type exceptions (`ValueError` or `TypeError`).
 
 ## Target Interface
-`ShoppingCart.apply_voucher(code: str, discount_pct: float) -> None`
-`ShoppingCart.get_total() -> float`
+`{target_cls}.validate_state() -> bool`
+`{target_cls}.apply_voucher(code: str, discount_pct: float) -> None`
 """
-
-    return "Mock response for query."
 
     return "Mock response for query."

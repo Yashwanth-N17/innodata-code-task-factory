@@ -1,5 +1,5 @@
 # ==============================================================================
-# OWNER: Maximus (Task Ideation & Spec Generator)
+# FEATURE: Feature 2 - SWE-bench Issue Specification Generator
 # LOADED BY: src/spec_generator.py
 # OUTPUT TARGET: instruction.md
 # ==============================================================================
@@ -21,6 +21,8 @@ CRITICAL RULES:
 3. STRUCTURE YOUR OUTPUT IN CLEAN MARKDOWN:
    - # Task Title
    - ## Problem Description
+   - ## Business Requirements
+   - ## Input & Output Schema
    - ## Specification & Acceptance Criteria
-   - ## Edge Cases & Error Handling
+   - ## Edge Cases & Error Handling (must specify at least 3 concrete edge cases)
    - ## Target Interface (Public API signature only)
