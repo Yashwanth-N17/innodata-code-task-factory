@@ -67,6 +67,7 @@ and aggregates Pass@1 benchmark reports across task suites.
 import argparse
 import inspect
 import json
+import logging
 import os
 import re
 import time
@@ -87,6 +88,14 @@ try:
     from .analyzer import CodebaseAnalyzer
 except ImportError:
     CodebaseAnalyzer = None
+
+logger = logging.getLogger(__name__)
+
+__all__ = ["BenchmarkEvaluator"]
+
+# Default retry parameters for LLM API calls
+_DEFAULT_MAX_RETRIES = 3
+_DEFAULT_RETRY_BACKOFF = 2.0  # seconds; doubles each attempt
 
 
 class BenchmarkEvaluator:
@@ -136,7 +145,15 @@ class BenchmarkEvaluator:
     def _load_task_metadata(self, task_dir: str) -> Dict[str, Any]:
         """Parse optional task.toml metadata (e.g., archetype/category) safely."""
         toml_path = os.path.join(task_dir, "task.toml")
-        if not os.path.exists(toml_path) or tomllib is None:
+        if not os.path.exists(toml_path):
+            return {}
+
+        if tomllib is None:
+            logger.warning(
+                "Neither tomllib (Python 3.11+) nor tomli is available; "
+                "task.toml metadata will be skipped for %s",
+                task_dir,
+            )
             return {}
 
         try:
@@ -160,7 +177,7 @@ class BenchmarkEvaluator:
 
     def _invoke_model(self, user_prompt: str, model_name: str) -> str:
         """
-        Adaptively call src.config.call_llm().
+        Adaptively call src.config.call_llm() with exponential-backoff retry.
         Inspects its signature so model_name and system_prompt are forwarded
         only when supported by the current config.py implementation.
         """
@@ -183,29 +200,48 @@ class BenchmarkEvaluator:
         elif "model_name" in params:
             call_kwargs["model_name"] = model_name
 
-        response = call_llm(**call_kwargs)
-        return response if isinstance(response, str) else str(response)
+        last_exc: Optional[Exception] = None
+        for attempt in range(_DEFAULT_MAX_RETRIES):
+            try:
+                response = call_llm(**call_kwargs)
+                return response if isinstance(response, str) else str(response)
+            except Exception as exc:
+                last_exc = exc
+                if attempt < _DEFAULT_MAX_RETRIES - 1:
+                    wait = _DEFAULT_RETRY_BACKOFF * (2 ** attempt)
+                    logger.warning(
+                        "LLM call attempt %d/%d failed (%s), retrying in %.1fs…",
+                        attempt + 1,
+                        _DEFAULT_MAX_RETRIES,
+                        exc,
+                        wait,
+                    )
+                    time.sleep(wait)
+        raise last_exc  # type: ignore[misc]
 
     @staticmethod
     def _extract_diff(raw_response: str) -> str:
         """
         Strip Markdown code fences and conversational filler from raw LLM output
-        to isolate a clean unified Git diff patch.
+        to isolate a clean unified Git diff patch.  When the response contains
+        multiple fenced diff blocks (e.g. one per file), they are concatenated.
         """
         if not raw_response or not raw_response.strip():
             return ""
 
         text = raw_response.replace("\r\n", "\n").strip()
 
-        # 1. Check for fenced code blocks first (e.g. ```diff ... ```)
+        # 1. Collect all fenced code blocks that look like diffs
         fenced_blocks = re.findall(
             r"```(?:diff|patch)?\s*\n(.*?)```", text, flags=re.DOTALL | re.IGNORECASE
         )
-        candidate = text
-        for block in fenced_blocks:
-            if "diff --git " in block or ("--- " in block and "+++ " in block):
-                candidate = block.strip()
-                break
+        diff_blocks = [
+            block.strip()
+            for block in fenced_blocks
+            if "diff --git " in block or ("--- " in block and "+++ " in block)
+        ]
+
+        candidate = "\n".join(diff_blocks) if diff_blocks else text
 
         # 2. Trim any prose appearing before the first unified diff header
         start_match = re.search(
@@ -405,7 +441,9 @@ class BenchmarkEvaluator:
 
         if output_report_path:
             output_abs = os.path.abspath(output_report_path)
-            os.makedirs(os.path.dirname(output_abs), exist_ok=True)
+            parent = os.path.dirname(output_abs)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
             with open(output_abs, "w", encoding="utf-8") as f:
                 json.dump(report, f, indent=2)
 
