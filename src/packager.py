@@ -3,7 +3,7 @@
 Feature 6: Standardized Task Packager.
 
 Standardizes and saves verified tasks into SWE-bench compliant task packages:
-- task.toml
+- task.toml (language-calibrated runtime & test command)
 - instruction.md
 - solution/solution.diff
 - tests/test_feature_patch.py

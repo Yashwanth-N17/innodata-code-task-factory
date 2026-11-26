@@ -3,12 +3,14 @@ Feature 9: Unified LLM Provider & Dynamic Mock Service.
 Supports: 'gemini', 'openai', and 'mock' (dynamic mock engine for rapid local testing without API keys).
 """
 
+from __future__ import annotations
+
 import os
 import re
 import sys
 import time
 import tempfile
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 
 try:
     from dotenv import load_dotenv
@@ -23,6 +25,45 @@ class Config:
     GEMINI_API_KEY: Optional[str] = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     OPENAI_API_KEY: Optional[str] = os.getenv("OPENAI_API_KEY")
     OPENAI_BASE_URL: Optional[str] = os.getenv("OPENAI_BASE_URL")
+    ANTHROPIC_API_KEY: Optional[str] = os.getenv("ANTHROPIC_API_KEY")
+
+
+_USAGE_LOG: List[Dict[str, Any]] = []
+
+
+def reset_usage_stats() -> None:
+    """Clear recorded LLM call telemetry."""
+    _USAGE_LOG.clear()
+
+
+def get_usage_stats() -> Dict[str, Any]:
+    """Return aggregated call counts, latency, and estimated token usage across all LLM calls."""
+    total_calls = len(_USAGE_LOG)
+    total_ms = sum(item["latency_ms"] for item in _USAGE_LOG)
+    total_prompt_chars = sum(item["prompt_chars"] for item in _USAGE_LOG)
+    total_output_chars = sum(item["output_chars"] for item in _USAGE_LOG)
+    by_model: Dict[str, int] = {}
+    for item in _USAGE_LOG:
+        key = f"{item['provider']}:{item['model']}"
+        by_model[key] = by_model.get(key, 0) + 1
+    return {
+        "total_calls": total_calls,
+        "total_latency_ms": round(total_ms, 2),
+        "est_input_tokens": total_prompt_chars // 4,
+        "est_output_tokens": total_output_chars // 4,
+        "by_model": by_model,
+    }
+
+
+def _record_usage(provider: str, model: str, prompt_str: str, out_str: str, start_ts: float) -> str:
+    _USAGE_LOG.append({
+        "provider": provider,
+        "model": model,
+        "prompt_chars": len(prompt_str),
+        "output_chars": len(out_str),
+        "latency_ms": (time.monotonic() - start_ts) * 1000.0,
+    })
+    return out_str
 
 
 def _is_transient_error(exc: Exception, _depth: int = 0) -> bool:
@@ -221,8 +262,10 @@ def call_llm(
         except (ValueError, TypeError):
             parsed_tokens = raw_tokens
 
+    t_start = time.monotonic()
+
     if target_provider == "mock":
-        return _mock_llm_response(prompt_str, sys_prompt_str, **kwargs)
+        return _record_usage("mock", target_model, prompt_str, _mock_llm_response(prompt_str, sys_prompt_str, **kwargs), t_start)
 
     if target_provider in ("gemini", "google", "google-genai", "google_genai"):
         api_key = kwargs.get("api_key") or Config.GEMINI_API_KEY or os.getenv("GOOGLE_API_KEY")
@@ -235,7 +278,7 @@ def call_llm(
         except ImportError:
             raise ImportError("Please install `google-genai` or set LLM_PROVIDER=mock in .env")
 
-        client = genai.Client(api_key=api_key.strip() if isinstance(api_key, str) else api_key)
+        client = genai.Client(api_key=api_key.strip() if isinstance(api_key, str) else api_key, http_options={"timeout": 60000})
 
         config_kwargs = {}
         effective_sys = sys_prompt_str or kwargs.get("system_instruction", "")
@@ -320,7 +363,40 @@ def call_llm(
                 pass
             return ""
 
-        return _execute_with_retry(_do_gemini_call, **kwargs)
+        return _record_usage("gemini", target_model, prompt_str, _execute_with_retry(_do_gemini_call, **kwargs), t_start)
+
+    if target_provider in ("anthropic", "claude"):
+        api_key = kwargs.get("api_key") or Config.ANTHROPIC_API_KEY or os.getenv("ANTHROPIC_API_KEY")
+        if not api_key or (isinstance(api_key, str) and not api_key.strip()):
+            raise ValueError("ANTHROPIC_API_KEY is not set. Please set the ANTHROPIC_API_KEY environment variable.")
+        try:
+            from anthropic import Anthropic
+        except ImportError:
+            raise ImportError("Please install `anthropic` or set LLM_PROVIDER=mock in .env")
+
+        client = Anthropic(api_key=api_key.strip() if isinstance(api_key, str) else api_key, timeout=60.0)
+        effective_sys = sys_prompt_str or kwargs.get("system_instruction", "")
+        anth_kwargs: Dict[str, Any] = {
+            "model": target_model,
+            "max_tokens": parsed_tokens if isinstance(parsed_tokens, int) else 4096,
+            "messages": [{"role": "user", "content": prompt_str}],
+        }
+        if effective_sys:
+            anth_kwargs["system"] = str(effective_sys)
+        if parsed_temp is not None:
+            anth_kwargs["temperature"] = parsed_temp
+
+        def _do_anthropic_call():
+            resp = client.messages.create(**anth_kwargs)
+            blocks = getattr(resp, "content", None) or []
+            texts = [
+                b.get("text", "") if isinstance(b, dict) else getattr(b, "text", "")
+                for b in blocks
+                if (b.get("type") if isinstance(b, dict) else getattr(b, "type", "text")) == "text"
+            ]
+            return "".join(texts)
+
+        return _record_usage("anthropic", target_model, prompt_str, _execute_with_retry(_do_anthropic_call, **kwargs), t_start)
 
     openai_compatible_providers = (
         "openai", "open_ai", "openai-compatible", "openai_compatible", "openai-compat",
@@ -340,13 +416,13 @@ def call_llm(
             }
             base_url = provider_base_urls.get(target_provider)
 
-        api_key = (
-            kwargs.get("api_key")
-            or Config.OPENAI_API_KEY
-            or os.getenv("OPENROUTER_API_KEY")
-            or os.getenv("GROQ_API_KEY")
-            or os.getenv("DEEPSEEK_API_KEY")
-        )
+        env_key_map = {
+            "openrouter": "OPENROUTER_API_KEY",
+            "groq": "GROQ_API_KEY",
+            "deepseek": "DEEPSEEK_API_KEY",
+        }
+        provider_env_key = os.getenv(env_key_map[target_provider]) if target_provider in env_key_map else None
+        api_key = kwargs.get("api_key") or Config.OPENAI_API_KEY or provider_env_key
         if target_provider in ("ollama", "localai", "vllm") and not api_key:
             api_key = "dummy_local_key"
 
@@ -358,7 +434,7 @@ def call_llm(
         except ImportError:
             raise ImportError("Please install `openai` or set LLM_PROVIDER=mock in .env")
 
-        client_kwargs = {"api_key": api_key.strip() if isinstance(api_key, str) else api_key}
+        client_kwargs = {"api_key": api_key.strip() if isinstance(api_key, str) else api_key, "timeout": 60.0}
         if base_url:
             client_kwargs["base_url"] = base_url
         if "organization" in kwargs:
@@ -375,7 +451,8 @@ def call_llm(
             "model": target_model,
             "messages": messages,
         }
-        if target_model.startswith(("o1", "o3")):
+        is_reasoning = target_model.startswith(("o1", "o3", "o4")) or any(x in target_model for x in ("/o1", "/o3", "/o4"))
+        if is_reasoning:
             if parsed_tokens is not None:
                 create_kwargs["max_completion_tokens"] = parsed_tokens
         else:
@@ -390,7 +467,7 @@ def call_llm(
             "api_key", "base_url", "organization", "max_retries", "initial_delay",
             "backoff_factor", "system_instruction", "max_output_tokens", "config",
             "category", "archetype", "target_file", "target_class", "target_cls",
-            "action", "repair_diff", "repair_tests", "is_repair", "spec"
+            "action", "repair_diff", "repair_tests", "is_repair", "spec", "language"
         )
         for k, v in kwargs.items():
             if k not in non_openai_keys:
@@ -422,7 +499,7 @@ def call_llm(
                         return str(choice_text)
             return ""
 
-        return _execute_with_retry(_do_openai_call, **kwargs)
+        return _record_usage(target_provider, target_model, prompt_str, _execute_with_retry(_do_openai_call, **kwargs), t_start)
 
     raise ValueError(f"Unknown LLM provider: {target_provider}")
 
@@ -696,8 +773,9 @@ except ImportError:
     import sys
     sys.path.insert(0, ".")
     sys.path.insert(0, "src")
-    if "{dir_name}":
-        sys.path.insert(0, "{dir_name}")
+    # Support src/ layout: import from package root, not module subfolder
+    if "{dir_name}".startswith("src"):
+        sys.path.insert(0, "{dir_name}".split("/src/")[0] if "/src/" in "{dir_name}" else ".")
     from {module_name} import {target_cls}
 
 def _instantiate():
@@ -844,12 +922,165 @@ The `{target_cls}` in `{target_file}` needs enhanced state validation and option
 """
 
 
+def _extract_numbered_lines_from_prompt(prompt_str: str, target_file: str) -> Tuple[List[Tuple[int, str]], bool]:
+    """Extract (line_no, line_text) pairs from Tier 2 numbered snippet for target_file."""
+    header = f"### File: {target_file}"
+    if header not in prompt_str:
+        return [], False
+    section = prompt_str.split(header, 1)[1]
+    if "```" in section:
+        parts = section.split("```", 2)
+        if len(parts) >= 2:
+            block = parts[1]
+            # Strip optional language tag on first line
+            if "\n" in block:
+                block = block.split("\n", 1)[1]
+            truncated = "... [truncated" in block
+            parsed: List[Tuple[int, str]] = []
+            for raw_line in block.splitlines():
+                m = re.match(r"^\s*(\d+)\s\|\s?(.*)$", raw_line)
+                if m:
+                    parsed.append((int(m.group(1)), m.group(2)))
+            return parsed, truncated
+    return [], False
+
+
+def _build_append_diff(target_file: str, added_lines: List[str], prompt_str: str = "") -> str:
+    """Build a valid unified diff inserting/appending lines using exact context from prompt or disk."""
+    if prompt_str:
+        numbered, truncated = _extract_numbered_lines_from_prompt(prompt_str, target_file)
+        if numbered:
+            if not truncated:
+                ctx = numbered[-2:] if len(numbered) >= 2 else numbered[-1:]
+                start_line = ctx[0][0]
+                orig_count = len(ctx)
+                new_count = orig_count + len(added_lines)
+                parts = [
+                    f"--- a/{target_file}",
+                    f"+++ b/{target_file}",
+                    f"@@ -{start_line},{orig_count} +{start_line},{new_count} @@",
+                ]
+                parts.extend(" " + txt for _, txt in ctx)
+                parts.extend("+" + line for line in added_lines)
+                return "\n".join(parts) + "\n"
+            else:
+                ctx = numbered[:2]
+                start_line = ctx[0][0]
+                orig_count = len(ctx)
+                new_count = orig_count + len(added_lines)
+                parts = [
+                    f"--- a/{target_file}",
+                    f"+++ b/{target_file}",
+                    f"@@ -{start_line},{orig_count} +{start_line},{new_count} @@",
+                ]
+                parts.extend(" " + txt for _, txt in ctx)
+                parts.extend("+" + line for line in added_lines)
+                return "\n".join(parts) + "\n"
+
+    disk_path = _find_target_file_on_disk(target_file)
+    if disk_path and os.path.isfile(disk_path):
+        try:
+            with open(disk_path, "r", encoding="utf-8", errors="replace") as f:
+                orig_lines = f.read().splitlines()
+            if orig_lines:
+                ctx = orig_lines[-2:] if len(orig_lines) >= 2 else orig_lines[-1:]
+                start_line = len(orig_lines) - len(ctx) + 1
+                orig_count = len(ctx)
+                new_count = orig_count + len(added_lines)
+                parts = [
+                    f"--- a/{target_file}",
+                    f"+++ b/{target_file}",
+                    f"@@ -{start_line},{orig_count} +{start_line},{new_count} @@",
+                ]
+                parts.extend(" " + line for line in ctx)
+                parts.extend("+" + line for line in added_lines)
+                return "\n".join(parts) + "\n"
+        except Exception:
+            pass
+
+    body = "\n".join("+" + line for line in added_lines)
+    return f"--- /dev/null\n+++ b/{target_file}\n@@ -0,0 +1,{len(added_lines)} @@\n{body}\n"
+
+
+def _generate_mock_ts_diff(target_file: str, target_cls: str, archetype: str, prompt_str: str = "") -> str:
+    """Generate a valid TypeScript unified git diff patch for mock mode."""
+    target_file = str(target_file).strip() if target_file else "src/index.ts"
+    added = [
+        "",
+        "export function validateFactoryState(input: string): boolean {",
+        '  if (typeof input !== "string" || !input.trim()) {',
+        '    throw new Error("Invalid input");',
+        "  }",
+        "  return true;",
+        "}",
+    ]
+    return _build_append_diff(target_file, added, prompt_str=prompt_str)
+
+
+def _generate_mock_ts_test(target_file: str, target_cls: str, archetype: str) -> str:
+    """Generate a valid TypeScript test file for mock mode."""
+    target_file = str(target_file).strip() if target_file else "src/index.ts"
+    rel_import = "../" + target_file.lstrip("./")
+    return (
+        f'import test from "node:test";\n'
+        f'import assert from "node:assert/strict";\n'
+        f'import {{ validateFactoryState }} from "{rel_import}";\n\n'
+        f'test("validateFactoryState validates non-empty string", () => {{\n'
+        f'  assert.equal(validateFactoryState("ok"), true);\n'
+        f'  assert.throws(() => validateFactoryState("  "), /Invalid input/);\n'
+        f'}});\n'
+    )
+
+
+def _generate_mock_cpp_diff(target_file: str, target_cls: str, archetype: str, prompt_str: str = "") -> str:
+    """Generate a valid C++ unified git diff patch for mock mode."""
+    target_file = str(target_file).strip() if target_file else "include/feature.h"
+    added = [
+        "",
+        "#include <string>",
+        "inline bool validate_factory_state(const std::string& input) {",
+        "    return !input.empty();",
+        "}",
+    ]
+    return _build_append_diff(target_file, added, prompt_str=prompt_str)
+
+
+def _generate_mock_cpp_test(target_file: str, target_cls: str, archetype: str) -> str:
+    """Generate a standalone C++ test file for mock mode."""
+    target_file = str(target_file).strip() if target_file else "include/feature.h"
+    return (
+        f'#include <cassert>\n'
+        f'#include "{target_file}"\n\n'
+        f'int main() {{\n'
+        f'    assert(validate_factory_state("ok") == true);\n'
+        f'    assert(validate_factory_state("") == false);\n'
+        f'    return 0;\n'
+        f'}}\n'
+    )
+
+
 def _mock_llm_response(prompt: str, system_prompt: str = "", **kwargs) -> str:
     """Dynamic mock responses adapting to the scanned repository for rapid local offline testing."""
     prompt_str = "" if prompt is None else str(prompt)
     sys_prompt_str = "" if system_prompt is None else str(system_prompt)
     prompt_lower = prompt_str.lower()
     system_lower = sys_prompt_str.lower()
+
+    # Detect target language
+    raw_lang = str(kwargs.get("language") or "").strip().lower()
+    if not raw_lang:
+        if "target language: typescript" in prompt_lower or "language: typescript" in prompt_lower:
+            raw_lang = "typescript"
+        elif "target language: c++" in prompt_lower or "language: c++" in prompt_lower:
+            raw_lang = "cpp"
+        elif "target language: go" in prompt_lower or "language: go" in prompt_lower:
+            raw_lang = "go"
+        elif "target language: rust" in prompt_lower or "language: rust" in prompt_lower:
+            raw_lang = "rust"
+        elif "target language: java" in prompt_lower or "language: java" in prompt_lower:
+            raw_lang = "java"
+        else:
+            raw_lang = "python"
 
     # Detect archetype from kwargs or prompt
     raw_cat = kwargs.get("category") or kwargs.get("archetype")
@@ -866,14 +1097,56 @@ def _mock_llm_response(prompt: str, system_prompt: str = "", **kwargs) -> str:
     raw_target_file = kwargs.get("target_file")
     target_file = str(raw_target_file).strip() if raw_target_file is not None and str(raw_target_file).strip() else None
     if not target_file:
-        file_match = re.search(r"in [`']?([a-zA-Z0-9_\-/]+\.py)[`']?", prompt_str)
-        target_file = file_match.group(1).strip() if file_match else "service.py"
+        if raw_lang == "cpp":
+            hdr_match = re.search(
+                r"(?:### File:\s*|in [`']?)([a-zA-Z0-9_\-./]+\.(?:h|hpp|hh))[`']?",
+                prompt_str,
+            )
+            file_match = hdr_match or re.search(
+                r"in [`']?([a-zA-Z0-9_\-./]+\.(?:cpp|cc|cxx|h|hpp))[`']?",
+                prompt_str,
+            )
+        else:
+            file_match = re.search(
+                r"in [`']?([a-zA-Z0-9_\-./]+\.(?:py|ts|tsx|js|cpp|cc|cxx|h|hpp))[`']?",
+                prompt_str,
+            )
+        if file_match:
+            target_file = file_match.group(1).strip()
+        elif raw_lang == "typescript":
+            target_file = "src/index.ts"
+        elif raw_lang == "cpp":
+            target_file = "include/feature.h"
+        else:
+            target_file = "service.py"
 
     raw_target_cls = kwargs.get("target_class") or kwargs.get("target_cls")
     target_cls = str(raw_target_cls).strip() if raw_target_cls is not None and str(raw_target_cls).strip() else None
     if not target_cls:
         cls_match = re.search(r"(?:class\s+|The\s+[`']?)([A-Z][a-zA-Z0-9_]+)", prompt_str)
         target_cls = cls_match.group(1).strip() if cls_match else "PaymentProcessor"
+
+    def _diff_for_lang(is_repair: bool = False) -> str:
+        if raw_lang == "typescript":
+            return _generate_mock_ts_diff(target_file, target_cls, category, prompt_str=prompt_str)
+        if raw_lang == "cpp":
+            return _generate_mock_cpp_diff(target_file, target_cls, category, prompt_str=prompt_str)
+        if raw_lang in ("go", "rust", "java"):
+            return f"--- a/{target_file}\n+++ b/{target_file}\n@@ -1,1 +1,3 @@\n+// feature: {category}\n+func validate_state() bool {{ return true }}\n"
+        return _generate_mock_diff(target_file, target_cls, category, is_repair=is_repair)
+
+    def _test_for_lang(is_repair: bool = False) -> str:
+        if raw_lang == "typescript":
+            return _generate_mock_ts_test(target_file, target_cls, category)
+        if raw_lang == "cpp":
+            return _generate_mock_cpp_test(target_file, target_cls, category)
+        if raw_lang == "go":
+            return "package main\n\nimport \"testing\"\n\nfunc TestFeaturePatch(t *testing.T) {\n    t.Log(\"ok\")\n}\n"
+        if raw_lang == "rust":
+            return "#[test]\nfn test_feature_patch() {\n    assert!(true);\n}\n"
+        if raw_lang == "java":
+            return "import org.junit.jupiter.api.Test;\nimport static org.junit.jupiter.api.Assertions.assertTrue;\n\nclass FeaturePatchTest {\n    @Test\n    void testFeaturePatch() { assertTrue(true); }\n}\n"
+        return _generate_mock_test(target_file, target_cls, category, is_repair=is_repair)
 
     # Check system prompt first to unambiguously distinguish agents
     if any(k in system_lower for k in [
@@ -884,17 +1157,17 @@ def _mock_llm_response(prompt: str, system_prompt: str = "", **kwargs) -> str:
                      "repair_diff" in prompt_lower or
                      bool(kwargs.get("repair_diff")) or
                      bool(kwargs.get("is_repair")))
-        return _generate_mock_diff(target_file, target_cls, category, is_repair=is_repair)
+        return _diff_for_lang(is_repair=is_repair)
 
     if any(k in system_lower for k in [
-        "test_feature_patch.py", "acceptance test synthesizer", "test_agent", "qa engineer", "feature 4"
+        "test_feature_patch", "acceptance test synthesizer", "test_agent", "qa engineer", "feature 4"
     ]):
         is_repair = ("previous test file:" in prompt_lower or
                      "corrected pytest test file" in prompt_lower or
                      "repair_tests" in prompt_lower or
                      bool(kwargs.get("repair_tests")) or
                      bool(kwargs.get("is_repair")))
-        return _generate_mock_test(target_file, target_cls, category, is_repair=is_repair)
+        return _test_for_lang(is_repair=is_repair)
 
     if any(k in system_lower for k in [
         "spec_generator", "task specification designer", "feature 2", "instruction.md"
@@ -904,13 +1177,13 @@ def _mock_llm_response(prompt: str, system_prompt: str = "", **kwargs) -> str:
     if any(k in system_lower for k in [
         "benchmark_evaluator", "evaluator_prompt", "feature 8", "benchmark evaluator"
     ]):
-        return _generate_mock_diff(target_file, target_cls, category, is_repair=False)
+        return _diff_for_lang(is_repair=False)
 
     # If system prompt is empty or generic, check prompt keywords
     if any(k in prompt_lower for k in [
         "swe-bench evaluation benchmark", "evaluator_prompt", "participating in a swe-bench"
     ]):
-        return _generate_mock_diff(target_file, target_cls, category, is_repair=False)
+        return _diff_for_lang(is_repair=False)
 
     if ("previous test file:" in prompt_lower or
         "corrected pytest test file" in prompt_lower or
@@ -919,7 +1192,7 @@ def _mock_llm_response(prompt: str, system_prompt: str = "", **kwargs) -> str:
         "repair test" in prompt_lower or
         bool(kwargs.get("repair_tests")) or
         kwargs.get("action") == "repair_tests"):
-        return _generate_mock_test(target_file, target_cls, category, is_repair=True)
+        return _test_for_lang(is_repair=True)
 
     if ("previous solution diff:" in prompt_lower or
         "corrected unified git diff" in prompt_lower or
@@ -928,13 +1201,13 @@ def _mock_llm_response(prompt: str, system_prompt: str = "", **kwargs) -> str:
         "repair diff" in prompt_lower or
         bool(kwargs.get("repair_diff")) or
         kwargs.get("action") == "repair_diff"):
-        return _generate_mock_diff(target_file, target_cls, category, is_repair=True)
+        return _diff_for_lang(is_repair=True)
 
-    if "return only valid python pytest code" in prompt_lower:
-        return _generate_mock_test(target_file, target_cls, category, is_repair=False)
+    if "return only valid python pytest code" in prompt_lower or "return only valid" in prompt_lower and "test code" in prompt_lower:
+        return _test_for_lang(is_repair=False)
 
     if "return only the unified git diff" in prompt_lower or "unified git diff" in prompt_lower:
-        return _generate_mock_diff(target_file, target_cls, category, is_repair=False)
+        return _diff_for_lang(is_repair=False)
 
     if ("task category request" in prompt_lower or
         "specification" in prompt_lower or

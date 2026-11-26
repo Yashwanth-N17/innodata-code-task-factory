@@ -19,7 +19,8 @@ from .config import call_llm
 
 
 class TestAgent:
-    def __init__(self, prompt_template_path: Optional[str] = None):
+    def __init__(self, prompt_template_path: Optional[str] = None, language_adapter=None):
+        self.language_adapter = language_adapter
         if not prompt_template_path:
             prompt_template_path = os.path.join(
                 os.path.dirname(__file__), "..", "prompts", "test_prompt.txt"
@@ -41,9 +42,8 @@ class TestAgent:
 Task Specification (instruction.md):
 {instruction_md}
 
-Write a comprehensive pytest test file that thoroughly tests all acceptance criteria and edge cases.
+{rules}
 The tests MUST fail against the current unpatched codebase, and pass once implemented.
-Return ONLY valid Python pytest code.
 """
 
         raw_output = call_llm(
@@ -200,7 +200,7 @@ Return ONLY the corrected Python test code.
             r"^\s*class\s+\w+",
             code,
             re.MULTILINE,
-        ) is not None
+        ) is not Noneebuild dashboard/templates/index.html (+ local static assets)
 
         if not has_import and not has_function and not has_class:
             raise ValueError(
@@ -219,7 +219,7 @@ Return ONLY the corrected Python test code.
             isinstance(node, ast.ClassDef)
             and any(
                 (
-                    isinstance(base, ast.Name)
+                    isinstanceebuild dashboard/templates/index.html (+ local static assets)(base, ast.Name)
                     and base.id == "TestCase"
                 )
                 or (

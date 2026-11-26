@@ -37,6 +37,8 @@ htmlcov/
 # Generated artifacts / tasks
 tasks/*
 !tasks/.gitkeep
+repos/
+benchmark_results/
 
 # IDE
 .vscode/

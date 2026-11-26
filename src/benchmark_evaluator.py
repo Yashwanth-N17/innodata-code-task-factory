@@ -1,10 +1,8 @@
 """
-Feature 8: Frontier AI Benchmark Evaluation Harness.
-Hands generated `instruction.md` to a target external AI model (e.g. Claude 3.5 Sonnet, GPT-4o),
-captures its output patch, and evaluates whether the model passes the hidden test suite in the sandbox.
-
-Input: Packaged task directory + target model identifier.
-Output: Evaluation audit dictionary containing solve rate and test logs.
+Feature 8: Frontier AI Benchmark Evaluation & Leaderboard Engine.
+Evaluates external AI models (Claude, GPT-4o/o3-mini, Gemini, DeepSeek, or mock)
+against generated task packages with full codebase context, aggregates Pass@1 solve
+rates by language and archetype, and generates JSON & Markdown leaderboards.
 """
 
 # import os
@@ -193,7 +191,7 @@ class BenchmarkEvaluator:
 
         user_prompt = (
             f"Target Codebase Context:\n{repo_context}\n\n"
-            f"Task Specification (instruction.md):\n{instruction_md}\n"
+            f"Task Specification (inebuild dashboard/templates/index.html (+ local static assets)struction.md):\n{instruction_md}\n"
         )
         return template, user_prompt
 
