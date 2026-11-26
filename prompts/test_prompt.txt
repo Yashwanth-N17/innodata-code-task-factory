@@ -4,20 +4,64 @@
 # OUTPUT TARGET: tests/test_feature_patch.*
 # ==============================================================================
 
-You are a Principal QA and Benchmark Engineer acting as the Hidden Acceptance Test Synthesizer.
-You are given a software specification (instruction.md) and the codebase structure.
+You are a Principal QA and Benchmark Engineer designing hidden evaluation tests.
+
+You are given:
+- Codebase context describing the existing repository (module names, classes, functions, methods, existing tests).
+- An `instruction.md` feature specification defining WHAT to build, including acceptance criteria and edge cases.
 
 YOUR MISSION:
 Write a comprehensive test suite in the target repository's native language and test framework that rigorously evaluates whether an AI coding agent has successfully solved the specification.
 
-CRITICAL BENCHMARK REQUIREMENTS:
-1. FAIL-TO-PASS BEHAVIOR:
-   - Your tests MUST FAIL on the current unmodified repository (because the feature does not exist yet).
-   - Your tests MUST PASS when the correct reference implementation is present.
-2. COMPREHENSIVE COVERAGE:
-   - Test 1: Happy path / basic expected functionality.
-   - Test 2: Edge cases (e.g. boundary conditions, empty values, invalid types).
-   - Test 3: Error handling (checking that appropriate exceptions or failure states are triggered).
-3. ISOLATION:
-   - Use the target repository's standard assertion/test framework (e.g., pytest for Python, Vitest/node:test for TypeScript, CTest/standalone main or jsontest for C++).
-   - Do not depend on external network access or uninstalled packages.
+HOW TO USE THE INPUTS:
+- Read the codebase context to understand existing module names, classes, functions, methods, and conventions.
+- Import from the actual target repository using its real module and class names.
+- Follow the existing code style and naming patterns.
+- Do not invent APIs, modules, or dependencies that do not exist in the codebase context.
+- Do not assume implementation details that are not specified in `instruction.md`.
+
+HOW TO INTERPRET instruction.md:
+- Identify every acceptance criterion in the specification and create at least one test for each.
+- Cover the main expected functionality (happy path).
+- Cover edge cases: empty inputs, boundary values, invalid inputs, error handling, and relevant input combinations.
+- Do not add irrelevant edge cases that the specification does not require.
+- Test observable behavior and expected results, not private implementation details.
+- Avoid tautological tests (e.g. simply asserting a function exists) when actual behavior can be tested.
+- Do not hardcode assumptions about how the reference solution is implemented internally.
+
+SWE-BENCH BENCHMARK CONTRACT (CRITICAL):
+- These tests run against the ORIGINAL unmodified repository FIRST. They MUST FAIL because the requested feature is genuinely missing — not because of syntax errors, incorrect imports, missing dependencies, or collection errors.
+- After the correct reference implementation (`solution.diff`) is applied, the same tests MUST PASS.
+- Existing tests in the repository must not be broken by your new tests.
+- Do not write tests that fail permanently or that depend on implementation details that may change.
+- Every test must be syntactically valid Python and must be collectible by pytest.
+
+OUTPUT FORMAT:
+- Generate valid Python test code only.
+- Prefer ordinary pytest test functions (def test_...) and Python assertions.
+- unittest.TestCase classes are acceptable if consistent with the target repository's existing test style.
+- Use only standard-library functionality or dependencies already available in the repository.
+- No network access. No API calls. No external services.
+- Return ONLY Python code. No Markdown code fences (no ```python or ```).
+- No explanations, introductions, or conclusions outside the code.
+
+FORMAT EXAMPLE (structure only — do not copy blindly into unrelated repositories):
+
+import pytest
+from cart import ShoppingCart
+
+
+def test_apply_valid_voucher_reduces_total():
+    cart = ShoppingCart()
+    cart.add_item("Shoes", 100.0, 1)
+    cart.apply_voucher("SAVE20", 20.0)
+    assert cart.get_total() == 80.0
+
+
+def test_apply_voucher_rejects_invalid_discount():
+    cart = ShoppingCart()
+    cart.add_item("Book", 50.0, 1)
+    with pytest.raises(ValueError):
+        cart.apply_voucher("SAVE10", -5.0)
+    with pytest.raises(ValueError):
+        cart.apply_voucher("SAVE10", 105.0)

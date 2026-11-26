@@ -1,12 +1,20 @@
+
 """
 Feature 4: Hidden Acceptance Test Synthesizer.
-Generates an isolated language-native test suite (`tests/test_feature_patch.*`) that strictly
-enforces the fail-to-pass guarantee (fails on unmodified repo, passes with reference solution applied).
+
+Generates an isolated pytest test suite (`test_patch.py`) that strictly
+enforces the fail-to-pass guarantee (fails on unmodified repo, passes
+with reference solution applied).
+
+Input: Codebase context + instruction.md specification.
+Output: Valid Python pytest file content.
 """
 
+import ast
 import os
 import re
 from typing import Optional
+
 from .config import call_llm
 
 
@@ -17,30 +25,18 @@ class TestAgent:
             prompt_template_path = os.path.join(
                 os.path.dirname(__file__), "..", "prompts", "test_prompt.txt"
             )
+
         with open(prompt_template_path, "r", encoding="utf-8") as f:
             self.system_prompt = f.read()
 
-    def _lang_instructions(self) -> tuple:
-        if not self.language_adapter:
-            return (
-                "Python",
-                "pytest",
-                "Write a comprehensive pytest test file that thoroughly tests all acceptance criteria and edge cases.\n"
-                "Return ONLY valid Python pytest code.",
-            )
-        ctx = self.language_adapter.get_prompt_context()
-        return (
-            ctx["language"],
-            ctx["test_framework"],
-            f"{ctx['test_rules']}\nReturn ONLY valid {ctx['language']} test code.",
-        )
+    def generate_tests(
+        self,
+        codebase_context: str,
+        instruction_md: str,
+    ) -> str:
+        """Generate pytest test cases testing the specification."""
 
-    def generate_tests(self, codebase_context: str, instruction_md: str) -> str:
-        """Generate language-native test cases verifying the specification."""
-        lang, framework, rules = self._lang_instructions()
-        user_prompt = f"""Target Language: {lang} (Test Framework: {framework})
-
-Codebase Context:
+        user_prompt = f"""Codebase Context:
 {codebase_context}
 
 Task Specification (instruction.md):
@@ -49,54 +45,194 @@ Task Specification (instruction.md):
 {rules}
 The tests MUST fail against the current unpatched codebase, and pass once implemented.
 """
+
         raw_output = call_llm(
             prompt=user_prompt,
             system_prompt=self.system_prompt,
-            language=getattr(self.language_adapter, "language_id", None),
         )
-        return self._clean_test_output(raw_output)
+
+        # Clean Markdown fences.
+        cleaned = self._clean_markdown_fences(raw_output)
+
+        # Validate generated tests.
+        self._validate_test_code(cleaned)
+
+        return cleaned
 
     def repair_tests(
         self,
         codebase_context: str,
         instruction_md: str,
-        previous_tests: str,
-        error_message: str,
+        rejected_tests: str,
+        error_feedback: str,
+        max_retries: int = 3,
     ) -> str:
-        """Self-Correction Feedback Loop: Fix test suite syntax errors, compile errors, or invalid imports."""
-        lang, framework, _ = self._lang_instructions()
-        repair_prompt = f"""Target Language: {lang} (Test Framework: {framework})
+        """
+        Repair rejected Python test code using bounded retry attempts.
 
-Codebase Context:
+        Every retry uses the original codebase context and instructions,
+        the rejected test code, and the latest error feedback.
+
+        Syntax validation and test-definition validation are performed
+        on every repaired output.
+
+        Actual test execution remains the verifier's responsibility.
+        """
+
+        for attempt in range(max_retries):
+
+            repair_prompt = f"""Codebase Context:
 {codebase_context}
 
-Task Specification:
+Task Specification (instruction.md):
 {instruction_md}
 
-Previous Test File:
-{previous_tests}
+The following Python test code was previously rejected:
 
-The test execution failed with the following error:
-{error_message}
+{rejected_tests}
 
-Please provide a corrected {lang} test file. Ensure imports/includes and assertions match the codebase accurately.
-Return ONLY valid {lang} test code.
+Reason for rejection:
+{error_feedback}
+
+Please correct the test code so that it is valid Python with recognizable
+test definitions (test_ functions or unittest.TestCase classes).
+
+Return ONLY the corrected Python test code.
 """
-        raw_output = call_llm(
-            prompt=repair_prompt,
-            system_prompt=self.system_prompt,
-            language=getattr(self.language_adapter, "language_id", None),
+
+            raw_output = call_llm(
+                prompt=repair_prompt,
+                system_prompt=self.system_prompt,
+            )
+
+            cleaned = self._clean_markdown_fences(raw_output)
+
+            try:
+                self._validate_test_code(cleaned)
+                return cleaned
+
+            except ValueError as exc:
+
+                # Feed the actual validation error into the next retry.
+                error_feedback = str(exc)
+
+                if attempt == max_retries - 1:
+                    raise ValueError(
+                        f"TestAgent failed to produce valid Python test code "
+                        f"after {max_retries} repair attempts. "
+                        f"Last error: {error_feedback}"
+                    ) from exc
+
+        raise ValueError(
+            f"TestAgent failed to produce valid Python test code "
+            f"after {max_retries} repair attempts."
         )
-        return self._clean_test_output(raw_output)
 
     @staticmethod
-    def _clean_test_output(raw_output: str) -> str:
-        if raw_output is None:
-            return ""
-        text = raw_output.strip()
-        m = re.search(r"```[a-zA-Z0-9_+-]*\n(.*?)```", text, re.DOTALL)
-        if m:
-            text = m.group(1)
-        text = re.sub(r"^```[a-zA-Z0-9_+-]*\s*\n", "", text)
-        text = re.sub(r"\n\s*```\s*$", "", text)
-        return (text.rstrip("\n") + "\n") if text.strip() else ""
+    def _clean_markdown_fences(raw_output: str) -> str:
+        """Remove surrounding Markdown code fences."""
+
+        cleaned = raw_output.lstrip()
+
+        # Match fully fenced code blocks.
+        fence_pattern = r"^```(\w+)?\n(.*?)\n```\s*$"
+
+        match = re.match(fence_pattern, cleaned, re.DOTALL)
+
+        if match:
+            return match.group(2)
+
+        # Fallback for non-standard fence formatting.
+        lines = cleaned.splitlines(keepends=True)
+
+        start = 0
+        end = len(lines)
+
+        if start < end and lines[start].startswith("```"):
+            start += 1
+
+        if start < end and lines[end - 1].strip() == "```":
+            end -= 1
+
+        return "".join(lines[start:end])
+
+    @staticmethod
+    def _validate_test_code(code: str) -> None:
+        """
+        Validate generated Python test code.
+
+        Checks:
+        1. Output is non-empty.
+        2. Python syntax is valid.
+        3. Contains recognizable Python code.
+        4. Contains pytest test functions or unittest TestCase classes.
+        """
+
+        if not code or not code.strip():
+            raise ValueError(
+                "TestAgent returned an empty response. "
+                "The LLM did not produce any Python test code."
+            )
+
+        # Validate Python syntax.
+        try:
+            tree = ast.parse(code)
+
+        except SyntaxError as exc:
+            raise ValueError(
+                f"TestAgent response is not valid Python syntax: {exc}"
+            ) from exc
+
+        # Detect Python code.
+        has_import = re.search(
+            r"^\s*(import|from)\b",
+            code,
+            re.MULTILINE,
+        ) is not None
+
+        has_function = re.search(
+            r"^\s*def\s+\w+",
+            code,
+            re.MULTILINE,
+        ) is not None
+
+        has_class = re.search(
+            r"^\s*class\s+\w+",
+            code,
+            re.MULTILINE,
+        ) is not Noneebuild dashboard/templates/index.html (+ local static assets)
+
+        if not has_import and not has_function and not has_class:
+            raise ValueError(
+                "TestAgent response does not appear to contain Python test code "
+                "(no imports, function definitions, or class definitions found)."
+            )
+
+        # Validate test definitions using AST.
+        has_test_function = any(
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name.startswith("test_")
+            for node in ast.walk(tree)
+        )
+
+        has_test_class = any(
+            isinstance(node, ast.ClassDef)
+            and any(
+                (
+                    isinstanceebuild dashboard/templates/index.html (+ local static assets)(base, ast.Name)
+                    and base.id == "TestCase"
+                )
+                or (
+                    isinstance(base, ast.Attribute)
+                    and base.attr == "TestCase"
+                )
+                for base in node.bases
+            )
+            for node in ast.walk(tree)
+        )
+
+        if not has_test_function and not has_test_class:
+            raise ValueError(
+                "TestAgent response contains Python code but no recognizable "
+                "test definitions (no 'test_' functions or TestCase subclasses)."
+            )
