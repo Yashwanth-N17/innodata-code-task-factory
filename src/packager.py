@@ -1,21 +1,19 @@
 """
-Feature 6: Standardized Task Packager.
+Feature 6: Standardized Polyglot Task Packager.
 Standardizes and saves verified tasks into SWE-bench compliant task packages:
-- task.toml
+- task.toml (language-calibrated runtime & test command)
 - instruction.md
 - solution/solution.diff
-- tests/test_feature_patch.py
-- validation_report.json
-
-Input: Task artifacts, repo metadata, and verification audit results.
-Output: Standardized directory on disk under tasks/<task_id>/.
+- tests/test_feature_patch.<ext>
+- validation_report.json & metadata.json
 """
 
 import json
 import os
-import shutil
 import time
-from typing import Dict, Any
+from typing import Any, Dict, Optional
+
+from .languages import BaseLanguageAdapter, PythonAdapter
 from .verifier import VerificationResult
 
 
@@ -33,8 +31,15 @@ class TaskPackager:
         solution_diff: str,
         test_code: str,
         verification: VerificationResult,
+        language_adapter: Optional[BaseLanguageAdapter] = None,
+        manifest: Optional[Dict[str, Any]] = None,
+        repo_meta: Optional[Dict[str, str]] = None,
     ) -> str:
-        """Create the standardized SWE-bench task package directory."""
+        """Create the standardized polyglot SWE-bench task package directory."""
+        adapter = language_adapter or PythonAdapter()
+        manifest = manifest or {}
+        repo_meta = repo_meta or {}
+
         task_dir = os.path.join(self.output_root, task_id)
         solution_dir = os.path.join(task_dir, "solution")
         tests_dir = os.path.join(task_dir, "tests")
@@ -52,27 +57,25 @@ class TaskPackager:
         with open(os.path.join(task_dir, "solution.diff"), "w", encoding="utf-8") as f:
             f.write(solution_diff)
 
-        # 3. Write tests/test_feature_patch.py and root test_patch.py
-        with open(os.path.join(tests_dir, "test_feature_patch.py"), "w", encoding="utf-8") as f:
+        # 3. Write language-native test file and root test_patch.<ext>
+        test_rel_path = os.path.join(task_dir, adapter.test_file_relpath)
+        os.makedirs(os.path.dirname(test_rel_path), exist_ok=True)
+        with open(test_rel_path, "w", encoding="utf-8") as f:
             f.write(test_code)
-        with open(os.path.join(task_dir, "test_patch.py"), "w", encoding="utf-8") as f:
+        with open(os.path.join(task_dir, adapter.root_test_filename), "w", encoding="utf-8") as f:
             f.write(test_code)
 
-        # 4. Write task.toml
-        toml_content = f"""# Task Package Configuration
-task_id = "{task_id}"
-repo_name = "{repo_name}"
-category = "{category}"
-created_at = "{time.strftime('%Y-%m-%dT%H:%M:%SZ')}"
-
-[environment]
-python_version = ">=3.9"
-test_command = "pytest tests/test_feature_patch.py"
-
-[evaluation]
-fail_to_pass = ["tests/test_feature_patch.py"]
-pass_to_pass = ["tests/"]
-"""
+        # 4. Write polyglot task.toml
+        created_at = time.strftime("%Y-%m-%dT%H:%M:%SZ")
+        env_meta = adapter.get_environment_metadata(task_dir, manifest)
+        toml_content = adapter.format_task_toml(
+            task_id=task_id,
+            repo_name=repo_name,
+            category=category,
+            created_at=created_at,
+            env_meta=env_meta,
+            repo_meta=repo_meta,
+        )
         with open(os.path.join(task_dir, "task.toml"), "w", encoding="utf-8") as f:
             f.write(toml_content)
 
@@ -80,8 +83,11 @@ pass_to_pass = ["tests/"]
         report = {
             "task_id": task_id,
             "repo_name": repo_name,
+            "language": adapter.language_id,
+            "repo_url": repo_meta.get("repo_url", ""),
+            "base_commit": repo_meta.get("commit_hash", ""),
             "category": category,
-            "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "created_at": created_at,
             "status": "VERIFIED" if verification.is_valid else "FAILED_VERIFICATION",
             "checks": {
                 "step1_baseline_pass": verification.step1_baseline_pass,
@@ -89,10 +95,7 @@ pass_to_pass = ["tests/"]
                 "step3_positive_pass": verification.step3_positive_pass,
                 "patch_applied_cleanly": verification.patch_applied_cleanly,
             },
-            "environment": {
-                "python_version": ">=3.9",
-                "test_command": "pytest tests/test_feature_patch.py",
-            },
+            "environment": env_meta,
             "evaluation": {
                 "fail_to_pass": list(verification.fail_to_pass),
                 "pass_to_pass": list(verification.pass_to_pass),

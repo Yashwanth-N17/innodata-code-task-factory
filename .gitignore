@@ -37,6 +37,7 @@ htmlcov/
 # Generated artifacts / tasks
 tasks/*
 !tasks/.gitkeep
+repos/
 
 # IDE
 .vscode/

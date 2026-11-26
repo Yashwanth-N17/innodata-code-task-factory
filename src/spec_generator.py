@@ -14,26 +14,31 @@ from .config import call_llm
 
 
 class SpecGenerator:
-    # Pattern to find line number leaks in validation
+    _SOURCE_EXT_GROUP = r"(?:py|ts|tsx|js|jsx|mts|mjs|cpp|cc|cxx|h|hpp|hh|inl|go|rs|java)"
+
+    # Pattern to find line number leaks in validation across all languages
     LINE_LEAK_FIND_RE = re.compile(
         r"\b(?:(?:at|on|around|near|in|from)\s+)?lines?\s*(?:#|:)?\s*\d+(?:\s*(?:-|to)\s*\d+)?\b"
-        r"|\b[a-zA-Z0-9_\-./]+\.py:\d+(?::\d+)?\b"
+        r"|\b[a-zA-Z0-9_\-./]+\." + _SOURCE_EXT_GROUP + r":\d+(?::\d+)?\b"
         r"|\bL\d+(?:-(?:L)?\d+)?\b",
         re.IGNORECASE,
     )
 
-    # Patterns used during sanitization
-    FILE_LINE_RE = re.compile(r"(?<=\.py):\d+(?::\d+)?\b", re.IGNORECASE)
+    # Patterns used during sanitization (capturing group avoids fixed-width lookbehind limits)
+    FILE_LINE_RE = re.compile(r"(\." + _SOURCE_EXT_GROUP + r"):\d+(?::\d+)?\b", re.IGNORECASE)
     LINE_NUM_RE = re.compile(
         r"\b(?:(?:at|on|around|near|in|from)\s+)?lines?\s*(?:#|:)?\s*\d+(?:\s*(?:-|to)\s*\d+)?\b"
         r"|\bL\d+(?:-(?:L)?\d+)?\b",
         re.IGNORECASE,
     )
 
-    # Pattern for private variables, chained private members, and private method calls
+    # Pattern for private variables, chained private members, TS #private, C++ member leaks, and private method calls
     PRIV_LEAK_RE = re.compile(
         r"\b[a-zA-Z0-9_]+(?:\._[a-zA-Z0-9_]*)+\b"
         r"|\._[a-zA-Z0-9_]*\b"
+        r"|\bthis\.#[a-zA-Z0-9_]+\b"
+        r"|\b[a-zA-Z0-9_]+->(?:_[a-zA-Z0-9_]+|m_[a-zA-Z0-9_]+)\b"
+        r"|\bm_[a-zA-Z][a-zA-Z0-9_]*\b"
         r"|\b_[a-zA-Z0-9_]+(?=\s*\()",
         re.IGNORECASE,
     )
@@ -90,7 +95,7 @@ Remember: Describe WHAT must be built and expected behavior/edge cases. Do NOT t
     def sanitize_spec(cls, spec_text: str) -> str:
         """Strip prohibited implementation artifacts while preserving requirements."""
         # 1. Strip file line numbers (e.g. service.py:42 -> service.py)
-        sanitized = cls.FILE_LINE_RE.sub("", spec_text)
+        sanitized = cls.FILE_LINE_RE.sub(r"\1", spec_text)
         # 2. Strip general line numbers and references (e.g. line 45, around line 99, L42)
         sanitized = cls.LINE_NUM_RE.sub("", sanitized)
         # 3. Redact private variables and method references with [internal]

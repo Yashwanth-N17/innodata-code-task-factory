@@ -844,12 +844,159 @@ The `{target_cls}` in `{target_file}` needs enhanced state validation and option
 """
 
 
+def _extract_numbered_lines_from_prompt(prompt_str: str, target_file: str) -> Tuple[List[Tuple[int, str]], bool]:
+    """Extract (line_no, line_text) pairs from Tier 2 numbered snippet for target_file."""
+    header = f"### File: {target_file}"
+    if header not in prompt_str:
+        return [], False
+    section = prompt_str.split(header, 1)[1]
+    if "```" in section:
+        parts = section.split("```", 2)
+        if len(parts) >= 2:
+            block = parts[1]
+            # Strip optional language tag on first line
+            if "\n" in block:
+                block = block.split("\n", 1)[1]
+            truncated = "... [truncated" in block
+            parsed: List[Tuple[int, str]] = []
+            for raw_line in block.splitlines():
+                m = re.match(r"^\s*(\d+)\s\|\s?(.*)$", raw_line)
+                if m:
+                    parsed.append((int(m.group(1)), m.group(2)))
+            return parsed, truncated
+    return [], False
+
+
+def _build_append_diff(target_file: str, added_lines: List[str], prompt_str: str = "") -> str:
+    """Build a valid unified diff inserting/appending lines using exact context from prompt or disk."""
+    if prompt_str:
+        numbered, truncated = _extract_numbered_lines_from_prompt(prompt_str, target_file)
+        if numbered:
+            if not truncated:
+                ctx = numbered[-2:] if len(numbered) >= 2 else numbered[-1:]
+                start_line = ctx[0][0]
+                orig_count = len(ctx)
+                new_count = orig_count + len(added_lines)
+                parts = [
+                    f"--- a/{target_file}",
+                    f"+++ b/{target_file}",
+                    f"@@ -{start_line},{orig_count} +{start_line},{new_count} @@",
+                ]
+                parts.extend(" " + txt for _, txt in ctx)
+                parts.extend("+" + line for line in added_lines)
+                return "\n".join(parts) + "\n"
+            else:
+                ctx = numbered[:2]
+                start_line = ctx[0][0]
+                orig_count = len(ctx)
+                new_count = orig_count + len(added_lines)
+                parts = [
+                    f"--- a/{target_file}",
+                    f"+++ b/{target_file}",
+                    f"@@ -{start_line},{orig_count} +{start_line},{new_count} @@",
+                ]
+                parts.extend(" " + txt for _, txt in ctx)
+                parts.extend("+" + line for line in added_lines)
+                return "\n".join(parts) + "\n"
+
+    disk_path = _find_target_file_on_disk(target_file)
+    if disk_path and os.path.isfile(disk_path):
+        try:
+            with open(disk_path, "r", encoding="utf-8", errors="replace") as f:
+                orig_lines = f.read().splitlines()
+            if orig_lines:
+                ctx = orig_lines[-2:] if len(orig_lines) >= 2 else orig_lines[-1:]
+                start_line = len(orig_lines) - len(ctx) + 1
+                orig_count = len(ctx)
+                new_count = orig_count + len(added_lines)
+                parts = [
+                    f"--- a/{target_file}",
+                    f"+++ b/{target_file}",
+                    f"@@ -{start_line},{orig_count} +{start_line},{new_count} @@",
+                ]
+                parts.extend(" " + line for line in ctx)
+                parts.extend("+" + line for line in added_lines)
+                return "\n".join(parts) + "\n"
+        except Exception:
+            pass
+
+    body = "\n".join("+" + line for line in added_lines)
+    return f"--- /dev/null\n+++ b/{target_file}\n@@ -0,0 +1,{len(added_lines)} @@\n{body}\n"
+
+
+def _generate_mock_ts_diff(target_file: str, target_cls: str, archetype: str, prompt_str: str = "") -> str:
+    """Generate a valid TypeScript unified git diff patch for mock mode."""
+    target_file = str(target_file).strip() if target_file else "src/index.ts"
+    added = [
+        "",
+        "export function validateFactoryState(input: string): boolean {",
+        '  if (typeof input !== "string" || !input.trim()) {',
+        '    throw new Error("Invalid input");',
+        "  }",
+        "  return true;",
+        "}",
+    ]
+    return _build_append_diff(target_file, added, prompt_str=prompt_str)
+
+
+def _generate_mock_ts_test(target_file: str, target_cls: str, archetype: str) -> str:
+    """Generate a valid TypeScript test file for mock mode."""
+    target_file = str(target_file).strip() if target_file else "src/index.ts"
+    rel_import = "../" + target_file.lstrip("./")
+    return (
+        f'import test from "node:test";\n'
+        f'import assert from "node:assert/strict";\n'
+        f'import {{ validateFactoryState }} from "{rel_import}";\n\n'
+        f'test("validateFactoryState validates non-empty string", () => {{\n'
+        f'  assert.equal(validateFactoryState("ok"), true);\n'
+        f'  assert.throws(() => validateFactoryState("  "), /Invalid input/);\n'
+        f'}});\n'
+    )
+
+
+def _generate_mock_cpp_diff(target_file: str, target_cls: str, archetype: str, prompt_str: str = "") -> str:
+    """Generate a valid C++ unified git diff patch for mock mode."""
+    target_file = str(target_file).strip() if target_file else "include/feature.h"
+    added = [
+        "",
+        "#include <string>",
+        "inline bool validate_factory_state(const std::string& input) {",
+        "    return !input.empty();",
+        "}",
+    ]
+    return _build_append_diff(target_file, added, prompt_str=prompt_str)
+
+
+def _generate_mock_cpp_test(target_file: str, target_cls: str, archetype: str) -> str:
+    """Generate a standalone C++ test file for mock mode."""
+    target_file = str(target_file).strip() if target_file else "include/feature.h"
+    return (
+        f'#include <cassert>\n'
+        f'#include "{target_file}"\n\n'
+        f'int main() {{\n'
+        f'    assert(validate_factory_state("ok") == true);\n'
+        f'    assert(validate_factory_state("") == false);\n'
+        f'    return 0;\n'
+        f'}}\n'
+    )
+
+
 def _mock_llm_response(prompt: str, system_prompt: str = "", **kwargs) -> str:
     """Dynamic mock responses adapting to the scanned repository for rapid local offline testing."""
     prompt_str = "" if prompt is None else str(prompt)
     sys_prompt_str = "" if system_prompt is None else str(system_prompt)
     prompt_lower = prompt_str.lower()
     system_lower = sys_prompt_str.lower()
+
+    # Detect target language
+    raw_lang = str(kwargs.get("language") or "").strip().lower()
+    if not raw_lang:
+        if "target language: typescript" in prompt_lower or "language: typescript" in prompt_lower:
+            raw_lang = "typescript"
+        elif "target language: c++" in prompt_lower or "language: c++" in prompt_lower:
+            raw_lang = "cpp"
+        else:
+            raw_lang = "python"
 
     # Detect archetype from kwargs or prompt
     raw_cat = kwargs.get("category") or kwargs.get("archetype")
@@ -866,14 +1013,48 @@ def _mock_llm_response(prompt: str, system_prompt: str = "", **kwargs) -> str:
     raw_target_file = kwargs.get("target_file")
     target_file = str(raw_target_file).strip() if raw_target_file is not None and str(raw_target_file).strip() else None
     if not target_file:
-        file_match = re.search(r"in [`']?([a-zA-Z0-9_\-/]+\.py)[`']?", prompt_str)
-        target_file = file_match.group(1).strip() if file_match else "service.py"
+        if raw_lang == "cpp":
+            hdr_match = re.search(
+                r"(?:### File:\s*|in [`']?)([a-zA-Z0-9_\-./]+\.(?:h|hpp|hh))[`']?",
+                prompt_str,
+            )
+            file_match = hdr_match or re.search(
+                r"in [`']?([a-zA-Z0-9_\-./]+\.(?:cpp|cc|cxx|h|hpp))[`']?",
+                prompt_str,
+            )
+        else:
+            file_match = re.search(
+                r"in [`']?([a-zA-Z0-9_\-./]+\.(?:py|ts|tsx|js|cpp|cc|cxx|h|hpp))[`']?",
+                prompt_str,
+            )
+        if file_match:
+            target_file = file_match.group(1).strip()
+        elif raw_lang == "typescript":
+            target_file = "src/index.ts"
+        elif raw_lang == "cpp":
+            target_file = "include/feature.h"
+        else:
+            target_file = "service.py"
 
     raw_target_cls = kwargs.get("target_class") or kwargs.get("target_cls")
     target_cls = str(raw_target_cls).strip() if raw_target_cls is not None and str(raw_target_cls).strip() else None
     if not target_cls:
         cls_match = re.search(r"(?:class\s+|The\s+[`']?)([A-Z][a-zA-Z0-9_]+)", prompt_str)
         target_cls = cls_match.group(1).strip() if cls_match else "PaymentProcessor"
+
+    def _diff_for_lang(is_repair: bool = False) -> str:
+        if raw_lang == "typescript":
+            return _generate_mock_ts_diff(target_file, target_cls, category, prompt_str=prompt_str)
+        if raw_lang == "cpp":
+            return _generate_mock_cpp_diff(target_file, target_cls, category, prompt_str=prompt_str)
+        return _generate_mock_diff(target_file, target_cls, category, is_repair=is_repair)
+
+    def _test_for_lang(is_repair: bool = False) -> str:
+        if raw_lang == "typescript":
+            return _generate_mock_ts_test(target_file, target_cls, category)
+        if raw_lang == "cpp":
+            return _generate_mock_cpp_test(target_file, target_cls, category)
+        return _generate_mock_test(target_file, target_cls, category, is_repair=is_repair)
 
     # Check system prompt first to unambiguously distinguish agents
     if any(k in system_lower for k in [
@@ -884,17 +1065,17 @@ def _mock_llm_response(prompt: str, system_prompt: str = "", **kwargs) -> str:
                      "repair_diff" in prompt_lower or
                      bool(kwargs.get("repair_diff")) or
                      bool(kwargs.get("is_repair")))
-        return _generate_mock_diff(target_file, target_cls, category, is_repair=is_repair)
+        return _diff_for_lang(is_repair=is_repair)
 
     if any(k in system_lower for k in [
-        "test_feature_patch.py", "acceptance test synthesizer", "test_agent", "qa engineer", "feature 4"
+        "test_feature_patch", "acceptance test synthesizer", "test_agent", "qa engineer", "feature 4"
     ]):
         is_repair = ("previous test file:" in prompt_lower or
                      "corrected pytest test file" in prompt_lower or
                      "repair_tests" in prompt_lower or
                      bool(kwargs.get("repair_tests")) or
                      bool(kwargs.get("is_repair")))
-        return _generate_mock_test(target_file, target_cls, category, is_repair=is_repair)
+        return _test_for_lang(is_repair=is_repair)
 
     if any(k in system_lower for k in [
         "spec_generator", "task specification designer", "feature 2", "instruction.md"
@@ -904,13 +1085,13 @@ def _mock_llm_response(prompt: str, system_prompt: str = "", **kwargs) -> str:
     if any(k in system_lower for k in [
         "benchmark_evaluator", "evaluator_prompt", "feature 8", "benchmark evaluator"
     ]):
-        return _generate_mock_diff(target_file, target_cls, category, is_repair=False)
+        return _diff_for_lang(is_repair=False)
 
     # If system prompt is empty or generic, check prompt keywords
     if any(k in prompt_lower for k in [
         "swe-bench evaluation benchmark", "evaluator_prompt", "participating in a swe-bench"
     ]):
-        return _generate_mock_diff(target_file, target_cls, category, is_repair=False)
+        return _diff_for_lang(is_repair=False)
 
     if ("previous test file:" in prompt_lower or
         "corrected pytest test file" in prompt_lower or
@@ -919,7 +1100,7 @@ def _mock_llm_response(prompt: str, system_prompt: str = "", **kwargs) -> str:
         "repair test" in prompt_lower or
         bool(kwargs.get("repair_tests")) or
         kwargs.get("action") == "repair_tests"):
-        return _generate_mock_test(target_file, target_cls, category, is_repair=True)
+        return _test_for_lang(is_repair=True)
 
     if ("previous solution diff:" in prompt_lower or
         "corrected unified git diff" in prompt_lower or
@@ -928,13 +1109,13 @@ def _mock_llm_response(prompt: str, system_prompt: str = "", **kwargs) -> str:
         "repair diff" in prompt_lower or
         bool(kwargs.get("repair_diff")) or
         kwargs.get("action") == "repair_diff"):
-        return _generate_mock_diff(target_file, target_cls, category, is_repair=True)
+        return _diff_for_lang(is_repair=True)
 
-    if "return only valid python pytest code" in prompt_lower:
-        return _generate_mock_test(target_file, target_cls, category, is_repair=False)
+    if "return only valid python pytest code" in prompt_lower or "return only valid" in prompt_lower and "test code" in prompt_lower:
+        return _test_for_lang(is_repair=False)
 
     if "return only the unified git diff" in prompt_lower or "unified git diff" in prompt_lower:
-        return _generate_mock_diff(target_file, target_cls, category, is_repair=False)
+        return _diff_for_lang(is_repair=False)
 
     if ("task category request" in prompt_lower or
         "specification" in prompt_lower or
