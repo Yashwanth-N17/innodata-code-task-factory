@@ -278,7 +278,7 @@ def call_llm(
         except ImportError:
             raise ImportError("Please install `google-genai` or set LLM_PROVIDER=mock in .env")
 
-        client = genai.Client(api_key=api_key.strip() if isinstance(api_key, str) else api_key)
+        client = genai.Client(api_key=api_key.strip() if isinstance(api_key, str) else api_key, http_options={"timeout": 60000})
 
         config_kwargs = {}
         effective_sys = sys_prompt_str or kwargs.get("system_instruction", "")
@@ -374,7 +374,7 @@ def call_llm(
         except ImportError:
             raise ImportError("Please install `anthropic` or set LLM_PROVIDER=mock in .env")
 
-        client = Anthropic(api_key=api_key.strip() if isinstance(api_key, str) else api_key)
+        client = Anthropic(api_key=api_key.strip() if isinstance(api_key, str) else api_key, timeout=60.0)
         effective_sys = sys_prompt_str or kwargs.get("system_instruction", "")
         anth_kwargs: Dict[str, Any] = {
             "model": target_model,
@@ -434,7 +434,7 @@ def call_llm(
         except ImportError:
             raise ImportError("Please install `openai` or set LLM_PROVIDER=mock in .env")
 
-        client_kwargs = {"api_key": api_key.strip() if isinstance(api_key, str) else api_key}
+        client_kwargs = {"api_key": api_key.strip() if isinstance(api_key, str) else api_key, "timeout": 60.0}
         if base_url:
             client_kwargs["base_url"] = base_url
         if "organization" in kwargs:
@@ -451,7 +451,8 @@ def call_llm(
             "model": target_model,
             "messages": messages,
         }
-        if target_model.startswith(("o1", "o3")):
+        is_reasoning = target_model.startswith(("o1", "o3", "o4")) or any(x in target_model for x in ("/o1", "/o3", "/o4"))
+        if is_reasoning:
             if parsed_tokens is not None:
                 create_kwargs["max_completion_tokens"] = parsed_tokens
         else:
@@ -1072,6 +1073,12 @@ def _mock_llm_response(prompt: str, system_prompt: str = "", **kwargs) -> str:
             raw_lang = "typescript"
         elif "target language: c++" in prompt_lower or "language: c++" in prompt_lower:
             raw_lang = "cpp"
+        elif "target language: go" in prompt_lower or "language: go" in prompt_lower:
+            raw_lang = "go"
+        elif "target language: rust" in prompt_lower or "language: rust" in prompt_lower:
+            raw_lang = "rust"
+        elif "target language: java" in prompt_lower or "language: java" in prompt_lower:
+            raw_lang = "java"
         else:
             raw_lang = "python"
 
@@ -1124,6 +1131,8 @@ def _mock_llm_response(prompt: str, system_prompt: str = "", **kwargs) -> str:
             return _generate_mock_ts_diff(target_file, target_cls, category, prompt_str=prompt_str)
         if raw_lang == "cpp":
             return _generate_mock_cpp_diff(target_file, target_cls, category, prompt_str=prompt_str)
+        if raw_lang in ("go", "rust", "java"):
+            return f"--- a/{target_file}\n+++ b/{target_file}\n@@ -1,1 +1,3 @@\n+// feature: {category}\n+func validate_state() bool {{ return true }}\n"
         return _generate_mock_diff(target_file, target_cls, category, is_repair=is_repair)
 
     def _test_for_lang(is_repair: bool = False) -> str:
@@ -1131,6 +1140,12 @@ def _mock_llm_response(prompt: str, system_prompt: str = "", **kwargs) -> str:
             return _generate_mock_ts_test(target_file, target_cls, category)
         if raw_lang == "cpp":
             return _generate_mock_cpp_test(target_file, target_cls, category)
+        if raw_lang == "go":
+            return "package main\n\nimport \"testing\"\n\nfunc TestFeaturePatch(t *testing.T) {\n    t.Log(\"ok\")\n}\n"
+        if raw_lang == "rust":
+            return "#[test]\nfn test_feature_patch() {\n    assert!(true);\n}\n"
+        if raw_lang == "java":
+            return "import org.junit.jupiter.api.Test;\nimport static org.junit.jupiter.api.Assertions.assertTrue;\n\nclass FeaturePatchTest {\n    @Test\n    void testFeaturePatch() { assertTrue(true); }\n}\n"
         return _generate_mock_test(target_file, target_cls, category, is_repair=is_repair)
 
     # Check system prompt first to unambiguously distinguish agents

@@ -10,6 +10,7 @@ import argparse
 import os
 import sys
 import time
+import uuid
 
 from src.analyzer import CodebaseAnalyzer
 from src.coder_agent import CoderAgent
@@ -125,100 +126,109 @@ def main():
     verified_tasks = []
 
     for idx, cat in enumerate(categories, 1):
-        task_id = f"task_{int(time.time())}_{idx:03d}_{cat['id']}"
-        print(f"\n[Phase 2.{idx}] Generating Task #{idx}: {cat['name']}")
-        print(f" Archetype: {cat['description']}")
-        print(f" Variant  : {cat.get('variant', '')}")
+        task_id = f"task_{int(time.time())}_{idx:03d}_{cat['id']}_{uuid.uuid4().hex[:6]}"
+        try:
+            print(f"\n[Phase 2.{idx}] Generating Task #{idx}: {cat['name']}")
+            print(f" Archetype: {cat['description']}")
+            print(f" Variant  : {cat.get('variant', '')}")
 
-        # Rotate focus modules across batch tasks for maximum repo coverage
-        spec_context = analyzer.get_context_prompt(target_offset=idx - 1)
-        coder_context = analyzer.get_targeted_context(target_offset=idx - 1)
+            # Rotate focus modules across batch tasks for maximum repo coverage
+            spec_context = analyzer.get_context_prompt(target_offset=idx - 1)
+            coder_context = analyzer.get_targeted_context(target_offset=idx - 1)
 
-        # Step A: Specification (Tier 1 only - zero line number / implementation leakage)
-        print("  -> Generating specification (instruction.md)...")
-        instruction_md = spec_gen.generate(
-            codebase_context=spec_context,
-            category=cat["id"],
-            variant=cat.get("variant"),
-        )
+            # Step A: Specification (Tier 1 only - zero line number / implementation leakage)
+            print("  -> Generating specification (instruction.md)...")
+            instruction_md = spec_gen.generate(
+                codebase_context=spec_context,
+                category=cat["id"],
+                variant=cat.get("variant"),
+            )
 
-        # Step B: Reference Code & Tests (Tier 1 + Tier 2 numbered source)
-        print("  -> Generating reference solution (solution.diff)...")
-        solution_diff = coder.generate_diff(codebase_context=coder_context, instruction_md=instruction_md)
+            # Step B: Reference Code & Tests (Tier 1 + Tier 2 numbered source)
+            print("  -> Generating reference solution (solution.diff)...")
+            solution_diff = coder.generate_diff(codebase_context=coder_context, instruction_md=instruction_md)
 
-        print(f"  -> Generating test suite ({analyzer.adapter.test_file_relpath})...")
-        test_code = tester.generate_tests(codebase_context=coder_context, instruction_md=instruction_md)
+            print(f"  -> Generating test suite ({analyzer.adapter.test_file_relpath})...")
+            test_code = tester.generate_tests(codebase_context=coder_context, instruction_md=instruction_md)
 
-        # Step C: Verification with Self-Correction Retry Loop
-        print("  -> Running SWE-bench 3-Step Verification Matrix...")
-        verification = verifier.verify(solution_diff=solution_diff, test_code=test_code)
+            # Step C: Verification with Self-Correction Retry Loop
+            print("  -> Running SWE-bench 3-Step Verification Matrix...")
+            verification = verifier.verify(solution_diff=solution_diff, test_code=test_code)
 
-        max_repairs = 2
-        repair_attempt = 0
-        while not verification.is_valid and repair_attempt < max_repairs:
-            repair_attempt += 1
-            if not verification.patch_applied_cleanly:
-                err_msg = verification.logs.get("patch_application", "Patch failed to apply.")
-                print(f"     [Self-Healing] Patch failure detected. Requesting CoderAgent repair ({repair_attempt}/{max_repairs})...")
-                solution_diff = coder.repair_diff(
-                    codebase_context=coder_context,
-                    instruction_md=instruction_md,
-                    previous_diff=solution_diff,
-                    error_message=err_msg,
-                )
-            elif not verification.step3_positive_pass:
-                err_msg = verification.logs.get("step3_positive_check", "Tests failed.")
-                if _is_test_side_failure(err_msg):
-                    print(f"     [Self-Healing] Test-side compile/import error detected. Requesting TestAgent repair ({repair_attempt}/{max_repairs})...")
-                    test_code = tester.repair_tests(
-                        codebase_context=coder_context,
-                        instruction_md=instruction_md,
-                        previous_tests=test_code,
-                        error_message=err_msg,
-                    )
-                else:
-                    print(f"     [Self-Healing] Step 3 failure detected. Requesting CoderAgent repair ({repair_attempt}/{max_repairs})...")
+            max_repairs = 2
+            repair_attempt = 0
+            if not verification.step1_baseline_pass:
+                print("     [Repo Setup Error] Baseline test suite failed; skipping self-healing repairs.")
+            while not verification.is_valid and repair_attempt < max_repairs and verification.step1_baseline_pass:
+                repair_attempt += 1
+                if not verification.patch_applied_cleanly:
+                    err_msg = verification.logs.get("patch_application", "Patch failed to apply.")
+                    print(f"     [Self-Healing] Patch failure detected. Requesting CoderAgent repair ({repair_attempt}/{max_repairs})...")
                     solution_diff = coder.repair_diff(
                         codebase_context=coder_context,
                         instruction_md=instruction_md,
                         previous_diff=solution_diff,
                         error_message=err_msg,
                     )
-            elif not verification.step2_negative_fail:
-                err_msg = "Negative check failed: tests passed on unpatched code (false positive)."
-                print(f"     [Self-Healing] Test validity failure detected. Requesting TestAgent repair ({repair_attempt}/{max_repairs})...")
-                test_code = tester.repair_tests(
-                    codebase_context=coder_context,
-                    instruction_md=instruction_md,
-                    previous_tests=test_code,
-                    error_message=err_msg,
-                )
+                elif not verification.step3_positive_pass:
+                    err_msg = verification.logs.get("step3_positive_check", "Tests failed.")
+                    if _is_test_side_failure(err_msg):
+                        print(f"     [Self-Healing] Test-side compile/import error detected. Requesting TestAgent repair ({repair_attempt}/{max_repairs})...")
+                        test_code = tester.repair_tests(
+                            codebase_context=coder_context,
+                            instruction_md=instruction_md,
+                            previous_tests=test_code,
+                            error_message=err_msg,
+                        )
+                    else:
+                        print(f"     [Self-Healing] Step 3 failure detected. Requesting CoderAgent repair ({repair_attempt}/{max_repairs})...")
+                        solution_diff = coder.repair_diff(
+                            codebase_context=coder_context,
+                            instruction_md=instruction_md,
+                            previous_diff=solution_diff,
+                            error_message=err_msg,
+                        )
+                elif not verification.step2_negative_fail:
+                    err_msg = "Negative check failed: tests passed on unpatched code (false positive)."
+                    print(f"     [Self-Healing] Test validity failure detected. Requesting TestAgent repair ({repair_attempt}/{max_repairs})...")
+                    test_code = tester.repair_tests(
+                        codebase_context=coder_context,
+                        instruction_md=instruction_md,
+                        previous_tests=test_code,
+                        error_message=err_msg,
+                    )
 
-            print(f"     -> Re-verifying repaired artifacts (Attempt {repair_attempt})...")
-            verification = verifier.verify(solution_diff=solution_diff, test_code=test_code)
+                print(f"     -> Re-verifying repaired artifacts (Attempt {repair_attempt})...")
+                verification = verifier.verify(solution_diff=solution_diff, test_code=test_code)
 
-        print(f"     [1] Baseline Existing Tests: {'PASS' if verification.step1_baseline_pass else 'FAIL'}")
-        print(f"     [2] Negative Check (Fail-to-Pass): {'FAIL (Verified)' if verification.step2_negative_fail else 'PASS (Invalid: False Positive)'}")
-        print(f"     [3] Positive Check (Pass-to-Pass): {'PASS' if verification.step3_positive_pass else 'FAIL'}")
+            print(f"     [1] Baseline Existing Tests: {'PASS' if verification.step1_baseline_pass else 'FAIL'}")
+            print(f"     [2] Negative Check (Fail-to-Pass): {'FAIL (Verified)' if verification.step2_negative_fail else 'PASS (Invalid: False Positive)'}")
+            print(f"     [3] Positive Check (Pass-to-Pass): {'PASS' if verification.step3_positive_pass else 'FAIL'}")
 
-        if args.check_rigor and verification.is_valid:
-            rigor = check_test_mutation_rigor(verifier, solution_diff, test_code)
-            print(f"     [Rigor Audit] {rigor['note']}")
+            rigor = None
+            if args.check_rigor and verification.is_valid:
+                rigor = check_test_mutation_rigor(verifier, solution_diff, test_code)
+                print(f"     [Rigor Audit] {rigor['note']}")
 
-        package_dir = packager.package(
-            task_id=task_id,
-            repo_name=repo_meta.get("repo_name") or os.path.basename(repo_path),
-            category=cat["id"],
-            instruction_md=instruction_md,
-            solution_diff=solution_diff,
-            test_code=test_code,
-            verification=verification,
-            language_adapter=analyzer.adapter,
-            manifest=scan_data.get("manifest"),
-            repo_meta=repo_meta,
-        )
-        print(f"  -> Packaged into: {package_dir}")
-        verified_tasks.append((task_id, verification.is_valid))
+            package_dir = packager.package(
+                task_id=task_id,
+                repo_name=repo_meta.get("repo_name") or os.path.basename(repo_path),
+                category=cat["id"],
+                instruction_md=instruction_md,
+                solution_diff=solution_diff,
+                test_code=test_code,
+                verification=verification,
+                language_adapter=analyzer.adapter,
+                manifest=scan_data.get("manifest"),
+                repo_meta=repo_meta,
+                rigor_check=rigor,
+            )
+            print(f"  -> Packaged into: {package_dir}")
+            verified_tasks.append((task_id, verification.is_valid))
+        except Exception as e:
+            print(f"  -> [ERROR] Task {idx} failed: {e}")
+            verified_tasks.append((task_id, False))
+            continue
 
     print("\n" + "=" * 65)
     print(" 📊 FACTORY EXECUTION SUMMARY")
@@ -238,6 +248,10 @@ def main():
         exp = export_swebench_jsonl(args.output, args.export_jsonl)
         print(f" Exported JSONL  : {exp['exported_count']} verified tasks -> {exp['output_path']}")
     print("=" * 65)
+
+    valid_count = sum(1 for _, v in verified_tasks if v)
+    if args.count and args.count > 0 and valid_count == 0 and len(verified_tasks) > 0:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

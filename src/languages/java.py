@@ -130,7 +130,7 @@ class JavaAdapter(BaseLanguageAdapter):
             cmd = [mvn, "-B", "test"]
             if target_test:
                 cmd.append("-Dtest=FeaturePatchTest")
-            report_glob = os.path.join(work_dir, "target", "surefire-reports", "TEST-*.xml")
+            report_glob = os.path.join(work_dir, "**", "target", "surefire-reports", "TEST-*.xml")
         else:
             gradlew = os.path.join(work_dir, "gradlew")
             gradle = gradlew if os.path.isfile(gradlew) else shutil.which("gradle")
@@ -139,7 +139,7 @@ class JavaAdapter(BaseLanguageAdapter):
             cmd = [gradle, "test"]
             if target_test:
                 cmd.extend(["--tests", "FeaturePatchTest"])
-            report_glob = os.path.join(work_dir, "build", "test-results", "test", "TEST-*.xml")
+            report_glob = os.path.join(work_dir, "**", "build", "test-results", "**", "TEST-*.xml")
 
         try:
             res = subprocess.run(
@@ -147,7 +147,7 @@ class JavaAdapter(BaseLanguageAdapter):
                 encoding="utf-8", errors="replace", timeout=timeout,
             )
             results: Dict[str, str] = {}
-            for xml_file in glob.glob(report_glob):
+            for xml_file in glob.glob(report_glob, recursive=True):
                 results.update(parse_junit_xml(xml_file))
             return res.returncode, res.stdout + "\n" + res.stderr, results
         except subprocess.TimeoutExpired:

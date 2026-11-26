@@ -156,6 +156,7 @@ class TypeScriptAdapter(BaseLanguageAdapter):
                 if isinstance(workspaces, dict):
                     workspaces = workspaces.get("packages") or []
                 # Also support pnpm-workspace.yaml
+                pnpm_ws = os.path.join(repo_path, "pnpm-workspace.yaml")
                 # parse pnpm-workspace.yaml packages manually (simple yaml)
                 if os.path.isfile(pnpm_ws):
                     try:

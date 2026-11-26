@@ -16,6 +16,8 @@ from src.exporter import export_swebench_jsonl
 st.set_page_config(page_title="InnoData Coding Task Factory", layout="wide")
 st.title("InnoData Automated Coding Task Factory (Polyglot Track 1)")
 
+WORKSPACE = os.path.dirname(os.path.abspath(__file__))
+
 tab_run, tab_tasks, tab_bench = st.tabs([
     "1. Generate Tasks",
     "2. Task Package Inspector",
@@ -43,6 +45,15 @@ with tab_run:
     with c_opt3:
         setup_env = st.checkbox("Bootstrap Dependencies (--setup-env)", value=False)
 
+    c_opt4, c_opt5, c_opt6 = st.columns(3)
+    with c_opt4:
+        check_rigor = st.checkbox("Check Test Mutation Rigor (--check-rigor)", value=False)
+    with c_opt5:
+        export_jsonl = st.checkbox("Export SWE-bench JSONL (--export-jsonl)", value=True)
+    with c_opt6:
+        export_name = st.text_input("JSONL filename", value="swebench_dataset.jsonl")
+    timeout_val = st.slider("Subprocess timeout (seconds)", 60, 1200, 600)
+
     if st.button("Launch Factory", type="primary"):
         cmd = [
             sys.executable, "run_factory.py",
@@ -50,21 +61,39 @@ with tab_run:
             "--language", lang_choice,
             "--count", str(task_count),
             "--sandbox", sandbox_mode,
+            "--timeout", "120",
         ]
         if mock_mode:
             cmd.append("--mock")
         if setup_env:
             cmd.append("--setup-env")
+        if check_rigor:
+            cmd.append("--check-rigor")
+        if export_jsonl:
+            cmd.extend(["--export-jsonl", export_name])
         with st.spinner("Running multi-agent scan, synthesis, and 3-step verification..."):
-            proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
-        st.code(proc.stdout + ("\n" + proc.stderr if proc.stderr else ""), language="text")
+            try:
+                proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=WORKSPACE, timeout=timeout_val)
+            except subprocess.TimeoutExpired:
+                st.error("Factory execution timed out.")
+                proc = None
+        if proc is not None:
+            if proc.returncode != 0:
+                st.error(f"Factory exited with code {proc.returncode}")
+            st.code(proc.stdout + ("\n" + proc.stderr if proc.stderr else ""), language="text")
 
 with tab_tasks:
     st.subheader("Verified SWE-bench Task Packages")
     tasks_root = st.text_input("Tasks Directory", value="tasks")
+    # confine tasks_root to workspace unless absolute
+    if not os.path.isabs(tasks_root):
+        tasks_root = os.path.join(WORKSPACE, tasks_root)
     if st.button("Export Verified Tasks to SWE-bench JSONL"):
-        summary = export_swebench_jsonl(tasks_dir=tasks_root, output_path=os.path.join(tasks_root, "swebench_dataset.jsonl"))
-        st.success(f"Exported {summary['exported_count']}/{summary['total_scanned']} verified tasks to {summary['output_path']}")
+        try:
+            summary = export_swebench_jsonl(tasks_dir=tasks_root, output_path=os.path.join(tasks_root, "swebench_dataset.jsonl"))
+            st.success(f"Exported {summary['exported_count']}/{summary['total_scanned']} verified tasks to {summary['output_path']}")
+        except Exception as e:
+            st.error(f"Export failed: {e}")
 
     if os.path.isdir(tasks_root):
         task_dirs = sorted([
@@ -80,12 +109,19 @@ with tab_tasks:
             report_path = os.path.join(tdir, "validation_report.json")
             report = {}
             if os.path.isfile(report_path):
-                with open(report_path, "r", encoding="utf-8") as f:
-                    report = json.load(f)
+                try:
+                    with open(report_path, "r", encoding="utf-8") as f:
+                        report = json.load(f)
+                except (json.JSONDecodeError, OSError):
+                    st.warning(f"⚠️ Corrupted metadata for task {selected}")
+                    report = {}
+            rigor = report.get("rigor_check") if isinstance(report, dict) else None
+            if rigor:
+                st.markdown(f"**Mutant Killed:** {rigor.get('mutant_killed')}")
 
-            checks = report.get("checks") or {}
+            checks = report.get("checks") or {} if isinstance(report, dict) else {}
             m1, m2, m3, m4 = st.columns(4)
-            m1.metric("Status", report.get("status", "UNKNOWN"))
+            m1.metric("Status", report.get("status", "UNKNOWN") if isinstance(report, dict) else "UNKNOWN")
             m2.metric("Step 1 Baseline", "PASS" if checks.get("step1_baseline_pass") else "FAIL")
             m3.metric("Step 2 Negative (Fail-to-Pass)", "FAIL (OK)" if checks.get("step2_negative_fail") else "INVALID")
             m4.metric("Step 3 Positive", "PASS" if checks.get("step3_positive_pass") else "FAIL")
@@ -93,8 +129,10 @@ with tab_tasks:
             p1, p2 = st.columns(2)
             with p1:
                 st.markdown("#### Specification (`instruction.md`)")
-                with open(os.path.join(tdir, "instruction.md"), "r", encoding="utf-8") as f:
-                    st.markdown(f.read())
+                ip = os.path.join(tdir, "instruction.md")
+                if os.path.isfile(ip):
+                    with open(ip, "r", encoding="utf-8") as f:
+                        st.markdown(f.read())
             with p2:
                 st.markdown("#### Reference Patch (`solution/solution.diff`)")
                 diff_p = os.path.join(tdir, "solution", "solution.diff")
@@ -111,10 +149,20 @@ with tab_tasks:
 with tab_bench:
     st.subheader("Frontier AI Model Benchmark Leaderboard")
     lb_path = st.text_input("Leaderboard JSON Path", value="benchmark_results/leaderboard.json")
+    if not os.path.isabs(lb_path):
+        lb_path = os.path.join(WORKSPACE, lb_path)
     if os.path.isfile(lb_path):
-        with open(lb_path, "r", encoding="utf-8") as f:
-            lb_report = json.load(f)
-        st.markdown(BatchBenchmarkRunner.render_markdown_leaderboard(lb_report))
-        st.json(lb_report.get("leaderboard", []))
+        try:
+            with open(lb_path, "r", encoding="utf-8") as f:
+                lb_report = json.load(f)
+        except (json.JSONDecodeError, OSError, KeyError) as e:
+            st.error(f"Failed to read leaderboard: {e}")
+            lb_report = None
+        if lb_report:
+            try:
+                st.markdown(BatchBenchmarkRunner.render_markdown_leaderboard(lb_report))
+            except Exception as e:
+                st.error(f"Render failed: {e}")
+            st.json(lb_report.get("leaderboard", []))
     else:
         st.info("No leaderboard report found yet. Run `python run_benchmark.py --repo <repo> --models gemini-2.0-flash,claude-3-5-sonnet,gpt-4o`.")

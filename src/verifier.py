@@ -199,6 +199,12 @@ class SandboxVerifier:
     def _execute_tests(self, work_dir: str, target_test: Optional[str] = None) -> Tuple[int, str, Dict[str, str]]:
         """Dispatch test execution to either local subprocess or isolated Docker container."""
         if self.sandbox == "docker":
+            inject = getattr(self.adapter, "_inject_cmake_test_target", None)
+            if callable(inject):
+                try:
+                    inject(work_dir, target_test)
+                except Exception:
+                    pass
             return DockerSandboxRunner.run_tests(
                 work_dir=work_dir,
                 adapter=self.adapter,

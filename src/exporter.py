@@ -21,7 +21,6 @@ def _read_text(path: str) -> str:
 
 
 def _find_test_file(task_dir: str) -> str:
-    # Language-aware candidates
     extra = [
         os.path.join(task_dir, "feature_patch_test.go"),
         os.path.join(task_dir, "src", "test", "java", "FeaturePatchTest.java"),
@@ -38,10 +37,18 @@ def _find_test_file(task_dir: str) -> str:
     for path in alt:
         if os.path.isfile(path):
             return path
-    # root-level test files
-    for name in os.listdir(task_dir) if os.path.isdir(task_dir) else []:
-        pass
     return ""
+
+
+def _is_comment_or_docstring(line: str) -> bool:
+    stripped = line.lstrip()
+    if stripped.startswith("+"):
+        stripped = stripped[1:].lstrip()
+    if stripped.startswith("#") or stripped.startswith("//") or stripped.startswith("/*") or stripped.startswith("*"):
+        return True
+    if '"""' in stripped or "'''" in stripped:
+        return True
+    return False
 
 
 def _mutate_diff_lines(solution_diff: str) -> Optional[str]:
@@ -50,19 +57,32 @@ def _mutate_diff_lines(solution_diff: str) -> Optional[str]:
     mutated = list(lines)
 
     replacements = [
+        (r"===", "!=="),
+        (r"!==", "==="),
+        (r"==", "!="),
+        (r"!=", "=="),
+        (r">=", "<"),
+        (r"<=", ">"),
+        (r"\bTrue\b", "False"),
+        (r"\bFalse\b", "True"),
+        (r"\btrue\b", "false"),
+        (r"\bfalse\b", "true"),
+        (r"\bNone\b", "0"),
+        (r"\bnull\b", "None"),
+        (r"\bnil\b", "None"),
         (r"\breturn\s+True\b", "return False"),
         (r"\breturn\s+False\b", "return True"),
-        (r"\breturn\s+true\b", "return false"),
-        (r"\breturn\s+false\b", "return true"),
-        (r"==", "!="),
-        (r">=", "<"),
+        (r" + ", " - "),
+        (r" - ", " + "),
     ]
     for idx, line in enumerate(mutated):
         if not line.startswith("+") or line.startswith("+++"):
             continue
+        if _is_comment_or_docstring(line):
+            continue
         for pat, rep in replacements:
             new_line, count = re.subn(pat, rep, line, count=1)
-            if count > 0:
+            if count > 0 and new_line != line:
                 mutated[idx] = new_line
                 return "".join(mutated)
     return None
@@ -75,24 +95,35 @@ def check_test_mutation_rigor(
 ) -> Dict[str, Any]:
     """
     Verify test suite cannot be fooled by a behavioral mutation of solution_diff.
-    Returns {'checked': bool, 'mutant_killed': Optional[bool], 'note': str}.
+    Returns {'checked': bool, 'mutant_killed': Optional[bool], 'note': str, 'mutant_diff': Optional[str]}.
     """
     mutant_diff = _mutate_diff_lines(solution_diff)
     if not mutant_diff:
         return {
             "checked": False,
             "mutant_killed": None,
+            "mutant_diff": None,
             "note": "No eligible boolean/comparison literal in added lines for lightweight mutation.",
         }
 
-    res = verifier.verify(solution_diff=mutant_diff, test_code=test_code)
-    killed = not res.step3_positive_pass
+    # Step-3 only: apply mutant_diff to a fresh copy and run tests directly
+    try:
+        # Use verifier.verify but we only care about step3; however to save time,
+        # we still call verify. Mutant killed if step3 fails.
+        res = verifier.verify(solution_diff=mutant_diff, test_code=test_code)
+    except Exception as e:
+        return {"checked": True, "mutant_killed": False, "mutant_diff": mutant_diff, "note": f"Patch application failed: {e}"}
+
+    if not getattr(res, "patch_applied_cleanly", True):
+        return {"checked": True, "mutant_killed": False, "mutant_diff": mutant_diff, "note": "Patch application failed"}
+
+    killed = not getattr(res, "step3_positive_pass", True)
     note = (
         "Test suite successfully rejected mutated solution (high rigor)."
         if killed
         else "WARNING: Test suite still passed on a mutated solution; strengthen assertions."
     )
-    return {"checked": True, "mutant_killed": killed, "note": note}
+    return {"checked": True, "mutant_killed": killed, "mutant_diff": mutant_diff, "note": note}
 
 
 def export_swebench_jsonl(

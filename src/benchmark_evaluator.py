@@ -21,17 +21,43 @@ def infer_provider(model_name: str, explicit_provider: Optional[str] = None) -> 
     """Infer LLM provider from model_name while honoring mock mode and explicit overrides."""
     if explicit_provider and explicit_provider.strip():
         return explicit_provider.strip().lower()
+    # Only fall back to mock if explicitly in mock mode
+    if explicit_provider == "mock":
+        return "mock"
+    # Provider-prefixed names (openai/gpt-4o, anthropic/claude-..., openrouter/...)
+    m = (model_name or "").strip().lower()
+    if "/" in m:
+        prefix, rest = m.split("/", 1)
+        if prefix in ("openai", "anthropic", "gemini", "deepseek", "openrouter", "groq", "ollama", "localai", "vllm"):
+            if prefix == "openrouter":
+                # infer from rest
+                m = rest
+            else:
+                # map known prefixes
+                if prefix == "openai":
+                    return "openai"
+                if prefix == "anthropic":
+                    return "anthropic"
+                if prefix == "gemini":
+                    return "gemini"
+                if prefix == "deepseek":
+                    return "deepseek"
+                if prefix in ("ollama", "localai", "vllm"):
+                    return prefix
+                if prefix == "groq":
+                    return "openai"
+    base = m.split("/")[-1]
+    if base.startswith("claude"):
+        return "anthropic"
+    if base.startswith("gemini"):
+        return "gemini"
+    if base.startswith(("gpt-", "o1", "o3", "o4")) or base.startswith(("o1", "o3", "o4")):
+        return "openai"
+    if base.startswith("deepseek"):
+        return "deepseek"
+    # Mock fallback only if Config explicitly mock
     if (Config.LLM_PROVIDER or "").strip().lower() == "mock":
         return "mock"
-    m = (model_name or "").strip().lower()
-    if m.startswith("claude"):
-        return "anthropic"
-    if m.startswith("gemini"):
-        return "gemini"
-    if m.startswith(("gpt-", "o1", "o3", "o4")):
-        return "openai"
-    if m.startswith("deepseek"):
-        return "deepseek"
     return None
 
 
@@ -171,7 +197,12 @@ class BatchBenchmarkRunner:
                 timeout=self.timeout,
             )
             for model in models:
-                rows.append(evaluator.evaluate_model(model_name=model))
+                try:
+                    rows.append(evaluator.evaluate_model(model_name=model))
+                except Exception as exc:
+                    import logging
+                    logging.error("Model %s evaluation failed: %s", model, exc)
+                    rows.append({"model_tested": model, "passed": False, "patch_clean": False, "llm_latency_ms": 0, "error": str(exc), "status": "FAILED"})
 
         leaderboard = self._aggregate_leaderboard(rows)
         report = {

@@ -81,7 +81,14 @@ Return ONLY the corrected unified git diff patch.
 
     @staticmethod
     def _clean_diff_output(raw_output: str) -> str:
-        cleaned = raw_output.strip()
-        cleaned = re.sub(r"^```[a-zA-Z0-9_+-]*\s*", "", cleaned)
-        cleaned = re.sub(r"\s*```$", "", cleaned)
-        return (cleaned.strip() + "\n") if cleaned.strip() else ""
+        if raw_output is None:
+            return ""
+        text = raw_output.strip()
+        # Extract fenced code block if present
+        m = re.search(r"```[a-zA-Z0-9_+-]*\n(.*?)```", text, re.DOTALL)
+        if m:
+            text = m.group(1)
+        # Remove leading fence line if still present
+        text = re.sub(r"^```[a-zA-Z0-9_+-]*\s*\n", "", text)
+        text = re.sub(r"\n\s*```\s*$", "", text)
+        return (text.rstrip("\n") + "\n") if text.strip() else ""

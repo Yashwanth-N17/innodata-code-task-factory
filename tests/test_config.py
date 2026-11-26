@@ -110,7 +110,7 @@ class TestGeminiProvider(unittest.TestCase):
         with patch.dict(sys.modules, modules_patch):
             out = call_llm(prompt="Test prompt", provider="gemini", initial_delay=0.0)
         self.assertEqual(out, "output from gemini")
-        mock_genai.Client.assert_called_once_with(api_key="env_gemini_key_789")
+        mock_genai.Client.assert_called_once_with(api_key="env_gemini_key_789", http_options={"timeout": 60000})
 
     def test_gemini_extended_config_kwargs(self):
         Config.GEMINI_API_KEY = "test_key"
@@ -181,7 +181,7 @@ class TestGeminiProvider(unittest.TestCase):
             )
 
         self.assertEqual(out, "Gemini generated patch content")
-        mock_genai.Client.assert_called_once_with(api_key="test_gemini_api_key_123")
+        mock_genai.Client.assert_called_once_with(api_key="test_gemini_api_key_123", http_options={"timeout": 60000})
         mock_types.GenerateContentConfig.assert_called_once_with(
             system_instruction="You are a principal engineer.",
             temperature=0.4,
@@ -298,7 +298,7 @@ class TestOpenAIProvider(unittest.TestCase):
             )
 
         self.assertEqual(out, "OpenAI generated code")
-        mock_openai_module.OpenAI.assert_called_once_with(api_key="test_openai_api_key_456")
+        mock_openai_module.OpenAI.assert_called_once_with(api_key="test_openai_api_key_456", timeout=60.0)
         mock_client.chat.completions.create.assert_called_once_with(
             model="gpt-4o",
             messages=[
@@ -334,6 +334,7 @@ class TestOpenAIProvider(unittest.TestCase):
         self.assertEqual(out, "Custom endpoint response")
         mock_openai_module.OpenAI.assert_called_once_with(
             api_key="groq_key",
+            timeout=60.0,
             base_url="https://api.groq.com/openai/v1",
         )
 
@@ -359,6 +360,7 @@ class TestOpenAIProvider(unittest.TestCase):
         self.assertEqual(out, "LocalAI result")
         mock_openai_module.OpenAI.assert_called_once_with(
             api_key="local_key",
+            timeout=60.0,
             base_url="http://localhost:8000/v1",
         )
 
@@ -377,7 +379,7 @@ class TestOpenAIProvider(unittest.TestCase):
             out = call_llm(prompt="Test", provider="openai")
 
         self.assertEqual(out, "Stripped base url")
-        mock_openai_module.OpenAI.assert_called_once_with(api_key="key")
+        mock_openai_module.OpenAI.assert_called_once_with(api_key="key", timeout=60.0)
 
     def test_openai_choice_text_legacy_fallback(self):
         mock_openai_module = MagicMock()
@@ -1196,13 +1198,13 @@ The `MethodSignature` in `analyzer.py` needs changes.
             with patch.dict(os.environ, {"GROQ_API_KEY": "groq_secret"}):
                 res = call_llm("Groq fast prompt", provider="groq")
         self.assertEqual(res, "Groq response")
-        mock_openai.OpenAI.assert_called_with(api_key="groq_secret", base_url="https://api.groq.com/openai/v1")
+        mock_openai.OpenAI.assert_called_with(api_key="groq_secret", timeout=60.0, base_url="https://api.groq.com/openai/v1")
 
         # Test Ollama local default endpoint routing (no API key required)
         with patch.dict(sys.modules, {"openai": mock_openai}):
             res_ollama = call_llm("Ollama prompt", provider="ollama")
         self.assertEqual(res_ollama, "Groq response")
-        mock_openai.OpenAI.assert_called_with(api_key="dummy_local_key", base_url="http://localhost:11434/v1")
+        mock_openai.OpenAI.assert_called_with(api_key="dummy_local_key", timeout=60.0, base_url="http://localhost:11434/v1")
 
     def test_mock_diff_absolute_path_handling(self):
         diff = _generate_mock_diff("/tmp/project/src/service.py", "PaymentProcessor", "new_feature")

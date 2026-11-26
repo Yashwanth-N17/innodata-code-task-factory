@@ -34,6 +34,7 @@ class TaskPackager:
         language_adapter: Optional[BaseLanguageAdapter] = None,
         manifest: Optional[Dict[str, Any]] = None,
         repo_meta: Optional[Dict[str, str]] = None,
+        rigor_check: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Create the standardized polyglot SWE-bench task package directory."""
         adapter = language_adapter or PythonAdapter()
@@ -106,6 +107,7 @@ class TaskPackager:
                 "pass_to_pass": list(verification.pass_to_pass),
             },
             "logs": verification.logs,
+            "rigor_check": rigor_check,
         }
         with open(os.path.join(task_dir, "validation_report.json"), "w", encoding="utf-8") as f:
             json.dump(report, f, indent=2)

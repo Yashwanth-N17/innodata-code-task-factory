@@ -204,7 +204,7 @@ class PhaseBBenchmarkAndAnthropicTests(unittest.TestCase):
             )
 
         self.assertEqual(out, "claude diff output")
-        mock_anthropic_mod.Anthropic.assert_called_once_with(api_key="anth_test_key")
+        mock_anthropic_mod.Anthropic.assert_called_once_with(api_key="anth_test_key", timeout=60.0)
         mock_client.messages.create.assert_called_once_with(
             model="claude-3-5-sonnet-20241022",
             max_tokens=1024,
@@ -224,7 +224,8 @@ class PhaseBBenchmarkAndAnthropicTests(unittest.TestCase):
         self.assertEqual(infer_provider("gemini-2.0-flash"), "gemini")
         self.assertEqual(infer_provider("deepseek-chat"), "deepseek")
         Config.LLM_PROVIDER = "mock"
-        self.assertEqual(infer_provider("claude-3-5-sonnet"), "mock")
+        self.assertEqual(infer_provider("claude-3-5-sonnet", explicit_provider="mock"), "mock")
+        self.assertEqual(infer_provider("claude-3-5-sonnet"), "anthropic")
 
     @unittest.skipUnless(_tool_available(sys.executable, "-m", "pytest", "--version"), "pytest required")
     def test_benchmark_evaluator_and_batch_leaderboard(self):
