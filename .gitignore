@@ -38,6 +38,7 @@ htmlcov/
 tasks/*
 !tasks/.gitkeep
 repos/
+benchmark_results/
 
 # IDE
 .vscode/

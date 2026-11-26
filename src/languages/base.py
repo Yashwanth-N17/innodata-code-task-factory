@@ -89,13 +89,13 @@ class BaseLanguageAdapter(ABC):
         repo_path: str,
         scan_data: Dict[str, Any],
         max_files: int = 3,
+        target_offset: int = 0,
     ) -> List[str]:
-        """Select high-value target source files (and paired files) for deep context injection."""
+        """Select high-value target source files (rotating when target_offset > 0)."""
         files = list(scan_data.get("files") or [])
         if not files:
             return []
 
-        # Score files by symbol richness (classes + functions) so entry points / core modules rank first
         file_scores: Dict[str, int] = {f: 0 for f in files}
         for cls in scan_data.get("classes") or []:
             f = cls.get("file", "")
@@ -107,6 +107,9 @@ class BaseLanguageAdapter(ABC):
                 file_scores[f] += 1 if fn.get("is_private") else 2
 
         ranked = sorted(files, key=lambda f: (-file_scores.get(f, 0), f))
+        if target_offset and len(ranked) > 1:
+            shift = target_offset % len(ranked)
+            ranked = ranked[shift:] + ranked[:shift]
         return ranked[:max(1, max_files)]
 
     def format_numbered_source(
@@ -194,19 +197,21 @@ class BaseLanguageAdapter(ABC):
         repo_meta: Optional[Dict[str, str]] = None,
     ) -> str:
         """Render standardized polyglot task.toml content."""
+        def _esc(s):
+            return str(s).replace("\\\\", "\\\\\\\\").replace('"', '\\\\"')
         repo_meta = repo_meta or {}
         lines = [
             "# Task Package Configuration",
-            f'task_id = "{task_id}"',
-            f'repo_name = "{repo_name}"',
-            f'language = "{self.language_id}"',
-            f'category = "{category}"',
-            f'created_at = "{created_at}"',
+            f'task_id = "{_esc(task_id)}"',
+            f'repo_name = "{_esc(repo_name)}"',
+            f'language = "{_esc(self.language_id)}"',
+            f'category = "{_esc(category)}"',
+            f'created_at = "{_esc(created_at)}"',
         ]
         if repo_meta.get("repo_url"):
-            lines.append(f'repo_url = "{repo_meta["repo_url"]}"')
+            lines.append(f'repo_url = "{_esc(repo_meta["repo_url"])}"')
         if repo_meta.get("commit_hash"):
-            lines.append(f'base_commit = "{repo_meta["commit_hash"]}"')
+            lines.append(f'base_commit = "{_esc(repo_meta["commit_hash"])}"')
 
         lines.append("")
         lines.append("[environment]")
@@ -216,10 +221,10 @@ class BaseLanguageAdapter(ABC):
             elif isinstance(v, (int, float)):
                 lines.append(f"{k} = {v}")
             elif isinstance(v, list):
-                items = ", ".join(f'"{item}"' for item in v)
+                items = ", ".join(f'"{_esc(item)}"' for item in v)
                 lines.append(f"{k} = [{items}]")
             else:
-                lines.append(f'{k} = "{v}"')
+                lines.append(f'{k} = "{_esc(v)}"')
 
         lines.extend([
             "",

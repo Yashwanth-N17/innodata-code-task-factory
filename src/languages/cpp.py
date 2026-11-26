@@ -319,9 +319,10 @@ class CppAdapter(BaseLanguageAdapter):
         repo_path: str,
         scan_data: Dict[str, Any],
         max_files: int = 3,
+        target_offset: int = 0,
     ) -> List[str]:
-        """Select core files and automatically pair .h declarations with .cpp implementations."""
-        ranked = super().select_targets(repo_path, scan_data, max_files=max_files)
+        """Select core files and automatically pair .h declarations with .cpp/.inl implementations."""
+        ranked = super().select_targets(repo_path, scan_data, max_files=max_files, target_offset=target_offset)
         all_files = scan_data.get("files") or []
         paired: List[str] = []
 
@@ -413,10 +414,9 @@ endif()
         build_dir = os.path.join(work_dir, "_factory_build")
         configure_cmd = [cmake_bin, "-S", work_dir, "-B", build_dir]
         for opt in manifest.get("test_options") or []:
-            if "POST_BUILD" in opt.upper():
-                configure_cmd.append(f"-D{opt}=OFF")
-            else:
-                configure_cmd.append(f"-D{opt}=ON")
+            configure_cmd.append(f"-D{opt}=ON")
+        for opt in manifest.get("disable_options") or []:
+            configure_cmd.append(f"-D{opt}=OFF")
         if shutil.which("ccache"):
             configure_cmd.append("-DCMAKE_CXX_COMPILER_LAUNCHER=ccache")
 

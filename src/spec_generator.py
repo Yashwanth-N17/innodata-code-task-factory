@@ -51,16 +51,30 @@ class SpecGenerator:
         with open(prompt_template_path, "r", encoding="utf-8") as f:
             self.system_prompt = f.read()
 
-    def generate(self, codebase_context: str, category: str = "new_feature") -> str:
-        """Generate the specification markdown and ensure zero HOW leakage."""
+    def generate(self, codebase_context: str, category: str = "new_feature", variant: Optional[str] = None) -> str:
+        """Generate the specification markdown, enforce required structure, and ensure zero HOW leakage."""
+        variant_line = f"\nFocus Variant: {variant}" if variant else ""
         user_prompt = f"""Target Codebase Context:
 {codebase_context}
 
-Task Category Request: {category.upper()}
+Task Category Request: {category.upper()}{variant_line}
 Please generate a realistic software engineering task specification for an AI coding agent.
 Remember: Describe WHAT must be built and expected behavior/edge cases. Do NOT tell the agent HOW to implement it.
 """
         spec_content = call_llm(prompt=user_prompt, system_prompt=self.system_prompt).strip()
+
+        # Structural validation retry when live LLM omits required SWE-bench sections or >= 3 edge cases
+        struct_ok, issues = self.validate_structure(spec_content)
+        if not struct_ok:
+            repair_prompt = (
+                f"{user_prompt}\n\nYour previous draft missed required elements ({'; '.join(issues)}). "
+                "Please regenerate the complete specification including all required headings "
+                "(## Business Requirements, ## Input & Output Schema, ## Specification & Acceptance Criteria, "
+                "## Edge Cases & Error Handling with at least 3 concrete bulleted edge cases)."
+            )
+            retried = call_llm(prompt=repair_prompt, system_prompt=self.system_prompt).strip()
+            if retried:
+                spec_content = retried
 
         # Audit and sanitize any unintentional leakage
         is_valid, warnings = self.validate_leakage(spec_content)

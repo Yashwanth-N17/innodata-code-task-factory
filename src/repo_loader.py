@@ -138,3 +138,34 @@ def resolve_repository(
         raise RuntimeError(f"Failed to clone '{raw_input}': {err}")
 
     return target_path, get_git_metadata(target_path, source_url=raw_input)
+
+
+def bootstrap_environment(repo_path: str, language_id: str) -> str:
+    """Best-effort dependency bootstrap for a cloned repository (only called when --setup-env is enabled)."""
+    import shutil
+    import sys
+
+    abs_repo = os.path.abspath(repo_path)
+    if language_id == "python":
+        venv_dir = os.path.join(abs_repo, ".venv")
+        venv_py = os.path.join(venv_dir, "bin", "python")
+        if not os.path.isfile(venv_py):
+            subprocess.run([sys.executable, "-m", "venv", venv_dir], check=True)
+        subprocess.run([venv_py, "-m", "pip", "install", "-q", "pytest"], check=False)
+        if os.path.isfile(os.path.join(abs_repo, "pyproject.toml")) or os.path.isfile(os.path.join(abs_repo, "setup.py")):
+            subprocess.run([venv_py, "-m", "pip", "install", "-q", "-e", abs_repo], check=False)
+        return f"Python virtualenv ready at {venv_dir}"
+
+    if language_id == "typescript":
+        for pm in ("pnpm", "npm", "yarn"):
+            pm_bin = shutil.which(pm)
+            if pm_bin and not os.path.isdir(os.path.join(abs_repo, "node_modules")):
+                subprocess.run([pm_bin, "install"], cwd=abs_repo, check=False)
+                return f"Installed JS/TS dependencies via {pm}"
+        return "Using existing node_modules or Node native runner"
+
+    if language_id == "cpp":
+        cmake_bin = shutil.which("cmake")
+        return f"CMake available at {cmake_bin}" if cmake_bin else "CMake missing in PATH"
+
+    return f"No bootstrap steps configured for {language_id}"

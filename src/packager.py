@@ -40,7 +40,12 @@ class TaskPackager:
         manifest = manifest or {}
         repo_meta = repo_meta or {}
 
-        task_dir = os.path.join(self.output_root, task_id)
+        safe_id = os.path.basename(str(task_id).replace("\\", "/").rstrip("/"))
+        if not safe_id or safe_id in (".", ".."):
+            raise ValueError(f"Invalid task_id: {task_id!r}")
+        task_dir = os.path.join(self.output_root, safe_id)
+        if os.path.commonpath([os.path.realpath(task_dir), os.path.realpath(self.output_root)]) != os.path.realpath(self.output_root):
+            raise ValueError(f"task_id escapes output_root: {task_id!r}")
         solution_dir = os.path.join(task_dir, "solution")
         tests_dir = os.path.join(task_dir, "tests")
 

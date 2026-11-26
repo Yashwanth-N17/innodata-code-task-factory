@@ -10,6 +10,9 @@ from .base import BaseLanguageAdapter
 from .python import PythonAdapter
 from .typescript import TypeScriptAdapter
 from .cpp import CppAdapter
+from .go import GoAdapter
+from .rust import RustAdapter
+from .java import JavaAdapter
 
 
 class LanguageRegistry:
@@ -19,6 +22,9 @@ class LanguageRegistry:
         "python": PythonAdapter,
         "typescript": TypeScriptAdapter,
         "cpp": CppAdapter,
+        "go": GoAdapter,
+        "rust": RustAdapter,
+        "java": JavaAdapter,
     }
 
     _ALIASES: Dict[str, str] = {
@@ -31,6 +37,9 @@ class LanguageRegistry:
         "c++": "cpp",
         "cxx": "cpp",
         "c": "cpp",
+        "golang": "go",
+        "rs": "rust",
+        "jdk": "java",
     }
 
     @classmethod

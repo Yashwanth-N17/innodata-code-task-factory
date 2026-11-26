@@ -155,6 +155,19 @@ class TypeScriptAdapter(BaseLanguageAdapter):
                 workspaces = pkg.get("workspaces") or []
                 if isinstance(workspaces, dict):
                     workspaces = workspaces.get("packages") or []
+                # Also support pnpm-workspace.yaml
+                # parse pnpm-workspace.yaml packages manually (simple yaml)
+                if os.path.isfile(pnpm_ws):
+                    try:
+                        with open(pnpm_ws, "r", encoding="utf-8") as f:
+                            for line in f:
+                                line = line.strip()
+                                if line.startswith("- "):
+                                    w = line[2:].strip().strip('"').strip("'")
+                                    if w and w not in workspaces:
+                                        workspaces.append(w)
+                    except Exception:
+                        pass
                 info["workspaces"] = list(workspaces)
 
                 for pattern in workspaces:
@@ -340,6 +353,7 @@ class TypeScriptAdapter(BaseLanguageAdapter):
         repo_path: str,
         scan_data: Dict[str, Any],
         max_files: int = 3,
+        target_offset: int = 0,
     ) -> List[str]:
         files = list(scan_data.get("files") or [])
         if not files:
@@ -365,6 +379,9 @@ class TypeScriptAdapter(BaseLanguageAdapter):
                 file_scores[f] -= 6
 
         ranked = sorted(files, key=lambda f: (-file_scores.get(f, 0), f))
+        if target_offset and len(ranked) > 1:
+            shift = target_offset % len(ranked)
+            ranked = ranked[shift:] + ranked[:shift]
         return ranked[:max(1, max_files)]
 
     def _link_node_modules_isolated(

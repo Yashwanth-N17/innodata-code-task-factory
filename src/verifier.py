@@ -18,6 +18,8 @@ import tempfile
 from typing import Dict, List, Optional, Tuple
 
 from .languages import BaseLanguageAdapter, LanguageRegistry, PythonAdapter, parse_junit_xml
+from .languages.python import detect_repo_python
+from .sandbox_docker import DockerSandboxRunner
 
 _COPY_IGNORE = shutil.ignore_patterns(
     "venv", ".venv", ".git", "__pycache__", ".pytest_cache",
@@ -180,13 +182,33 @@ class SandboxVerifier:
         python_executable: str = None,
         language: Optional[str] = None,
         adapter: Optional[BaseLanguageAdapter] = None,
+        sandbox: str = "local",
+        docker_image: Optional[str] = None,
     ):
         self.repo_path = os.path.abspath(repo_path)
         self.strict_patch = strict_patch
         self.timeout = timeout
-        self.python_executable = python_executable or sys.executable
+        self.python_executable = python_executable or detect_repo_python(self.repo_path) or sys.executable
         self.adapter: BaseLanguageAdapter = adapter or LanguageRegistry.get_adapter(self.repo_path, language=language)
+        self.sandbox = (sandbox or "local").strip().lower()
+        self.docker_image = docker_image
+        if self.sandbox == "docker" and not DockerSandboxRunner.is_available():
+            raise RuntimeError("Docker sandbox requested, but Docker CLI/daemon is unavailable.")
         self.last_patch_tier = ""
+
+    def _execute_tests(self, work_dir: str, target_test: Optional[str] = None) -> Tuple[int, str, Dict[str, str]]:
+        """Dispatch test execution to either local subprocess or isolated Docker container."""
+        if self.sandbox == "docker":
+            return DockerSandboxRunner.run_tests(
+                work_dir=work_dir,
+                adapter=self.adapter,
+                target_test=target_test,
+                timeout=self.timeout,
+                image=self.docker_image,
+            )
+        return self.adapter.run_tests(
+            work_dir, target_test=target_test, timeout=self.timeout, python_executable=self.python_executable
+        )
 
     # ---- helpers -----------------------------------------------------------
 
@@ -213,23 +235,20 @@ class SandboxVerifier:
             "timeout_seconds": self.timeout,
             "strict_patch": self.strict_patch,
             "language": self.adapter.language_id,
+            "sandbox": self.sandbox,
         }
 
         with tempfile.TemporaryDirectory() as temp_dir:
             # Step 1: Baseline (original repo + existing tests -> PASS)
             base_dir = self._fresh_copy(temp_dir, "step1_baseline")
-            code, out, base_results = self.adapter.run_tests(
-                base_dir, timeout=self.timeout, python_executable=self.python_executable
-            )
+            code, out, base_results = self._execute_tests(base_dir)
             result.logs["step1_baseline"] = out
             result.step1_baseline_pass = (code == 0)
 
             # Step 2: Negative check (original repo + new tests -> real FAIL)
             neg_dir = self._fresh_copy(temp_dir, "step2_negative")
             test_path = self.adapter.write_test_file(neg_dir, test_code)
-            code, out, _ = self.adapter.run_tests(
-                neg_dir, target_test=test_path, timeout=self.timeout, python_executable=self.python_executable
-            )
+            code, out, _ = self._execute_tests(neg_dir, target_test=test_path)
             result.logs["step2_negative_check"] = out
             result.step2_negative_fail = self.adapter.is_real_failure(code, out)
 
@@ -258,9 +277,7 @@ class SandboxVerifier:
 
             if result.patch_applied_cleanly:
                 self.adapter.write_test_file(pos_dir, test_code)
-                all_code, all_out, after = self.adapter.run_tests(
-                    pos_dir, timeout=self.timeout, python_executable=self.python_executable
-                )
+                all_code, all_out, after = self._execute_tests(pos_dir)
                 result.logs["step3_positive_check"] = all_out
 
                 result.fail_to_pass = sorted(
@@ -335,18 +352,38 @@ class SandboxVerifier:
             if not files:
                 return 1, f"Manual patch failed: no valid diff hunks found. {git_err}".strip()
 
+            def _safe(rel):
+                if not rel:
+                    return None
+                if os.path.isabs(rel):
+                    return None
+                norm = os.path.normpath(rel)
+                if norm == ".." or norm.startswith("../") or "/../" in norm:
+                    return None
+                full = os.path.realpath(os.path.join(cwd, norm))
+                if os.path.commonpath([full, os.path.realpath(cwd)]) != os.path.realpath(cwd):
+                    return None
+                return full
+
             planned = []
             for entry in files:
                 old_p, new_p, hunks = entry["old"], entry["new"], entry["hunks"]
                 if new_p is None and old_p:
-                    planned.append((os.path.join(cwd, old_p), None))
+                    p = _safe(old_p)
+                    if p is None:
+                        return 1, "Manual patch failed: unsafe path."
+                    planned.append((p, None))
                     continue
 
-                target = os.path.join(cwd, new_p or old_p)
+                target = _safe(new_p or old_p)
+                if target is None:
+                    return 1, "Manual patch failed: unsafe path."
                 if old_p is None:
                     orig = []
                 else:
-                    src = os.path.join(cwd, old_p)
+                    src = _safe(old_p)
+                    if src is None:
+                        return 1, "Manual patch failed: unsafe path."
                     if not os.path.exists(src):
                         return 1, f"Manual patch failed: target file {old_p} not found."
                     with open(src, "r", encoding="utf-8", errors="replace") as f:

@@ -166,6 +166,16 @@ def _extract_signature(node: Union[ast.FunctionDef, ast.AsyncFunctionDef]) -> Di
     }
 
 
+def detect_repo_python(repo_path: str) -> Optional[str]:
+    """Return an isolated venv Python interpreter inside repo_path if present."""
+    for venv_dir in (".venv", "venv"):
+        for rel in (os.path.join(venv_dir, "bin", "python"), os.path.join(venv_dir, "Scripts", "python.exe")):
+            candidate = os.path.join(repo_path, rel)
+            if os.path.isfile(candidate):
+                return candidate
+    return None
+
+
 class PythonAdapter(BaseLanguageAdapter):
     """Language adapter for Python repositories (e.g., pallets/click)."""
 
@@ -339,6 +349,11 @@ class PythonAdapter(BaseLanguageAdapter):
                     })
         except Exception:
             pass
+
+    @staticmethod
+    def detect_python_executable(repo_path: str) -> str:
+        """Use repo-local virtualenv python if present, otherwise current sys.executable."""
+        return detect_repo_python(repo_path) or sys.executable
 
     def run_tests(
         self,

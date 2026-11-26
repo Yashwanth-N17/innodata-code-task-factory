@@ -3,12 +3,14 @@ Feature 9: Unified LLM Provider & Dynamic Mock Service.
 Supports: 'gemini', 'openai', and 'mock' (dynamic mock engine for rapid local testing without API keys).
 """
 
+from __future__ import annotations
+
 import os
 import re
 import sys
 import time
 import tempfile
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 
 try:
     from dotenv import load_dotenv
@@ -23,6 +25,45 @@ class Config:
     GEMINI_API_KEY: Optional[str] = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     OPENAI_API_KEY: Optional[str] = os.getenv("OPENAI_API_KEY")
     OPENAI_BASE_URL: Optional[str] = os.getenv("OPENAI_BASE_URL")
+    ANTHROPIC_API_KEY: Optional[str] = os.getenv("ANTHROPIC_API_KEY")
+
+
+_USAGE_LOG: List[Dict[str, Any]] = []
+
+
+def reset_usage_stats() -> None:
+    """Clear recorded LLM call telemetry."""
+    _USAGE_LOG.clear()
+
+
+def get_usage_stats() -> Dict[str, Any]:
+    """Return aggregated call counts, latency, and estimated token usage across all LLM calls."""
+    total_calls = len(_USAGE_LOG)
+    total_ms = sum(item["latency_ms"] for item in _USAGE_LOG)
+    total_prompt_chars = sum(item["prompt_chars"] for item in _USAGE_LOG)
+    total_output_chars = sum(item["output_chars"] for item in _USAGE_LOG)
+    by_model: Dict[str, int] = {}
+    for item in _USAGE_LOG:
+        key = f"{item['provider']}:{item['model']}"
+        by_model[key] = by_model.get(key, 0) + 1
+    return {
+        "total_calls": total_calls,
+        "total_latency_ms": round(total_ms, 2),
+        "est_input_tokens": total_prompt_chars // 4,
+        "est_output_tokens": total_output_chars // 4,
+        "by_model": by_model,
+    }
+
+
+def _record_usage(provider: str, model: str, prompt_str: str, out_str: str, start_ts: float) -> str:
+    _USAGE_LOG.append({
+        "provider": provider,
+        "model": model,
+        "prompt_chars": len(prompt_str),
+        "output_chars": len(out_str),
+        "latency_ms": (time.monotonic() - start_ts) * 1000.0,
+    })
+    return out_str
 
 
 def _is_transient_error(exc: Exception, _depth: int = 0) -> bool:
@@ -221,8 +262,10 @@ def call_llm(
         except (ValueError, TypeError):
             parsed_tokens = raw_tokens
 
+    t_start = time.monotonic()
+
     if target_provider == "mock":
-        return _mock_llm_response(prompt_str, sys_prompt_str, **kwargs)
+        return _record_usage("mock", target_model, prompt_str, _mock_llm_response(prompt_str, sys_prompt_str, **kwargs), t_start)
 
     if target_provider in ("gemini", "google", "google-genai", "google_genai"):
         api_key = kwargs.get("api_key") or Config.GEMINI_API_KEY or os.getenv("GOOGLE_API_KEY")
@@ -320,7 +363,40 @@ def call_llm(
                 pass
             return ""
 
-        return _execute_with_retry(_do_gemini_call, **kwargs)
+        return _record_usage("gemini", target_model, prompt_str, _execute_with_retry(_do_gemini_call, **kwargs), t_start)
+
+    if target_provider in ("anthropic", "claude"):
+        api_key = kwargs.get("api_key") or Config.ANTHROPIC_API_KEY or os.getenv("ANTHROPIC_API_KEY")
+        if not api_key or (isinstance(api_key, str) and not api_key.strip()):
+            raise ValueError("ANTHROPIC_API_KEY is not set. Please set the ANTHROPIC_API_KEY environment variable.")
+        try:
+            from anthropic import Anthropic
+        except ImportError:
+            raise ImportError("Please install `anthropic` or set LLM_PROVIDER=mock in .env")
+
+        client = Anthropic(api_key=api_key.strip() if isinstance(api_key, str) else api_key)
+        effective_sys = sys_prompt_str or kwargs.get("system_instruction", "")
+        anth_kwargs: Dict[str, Any] = {
+            "model": target_model,
+            "max_tokens": parsed_tokens if isinstance(parsed_tokens, int) else 4096,
+            "messages": [{"role": "user", "content": prompt_str}],
+        }
+        if effective_sys:
+            anth_kwargs["system"] = str(effective_sys)
+        if parsed_temp is not None:
+            anth_kwargs["temperature"] = parsed_temp
+
+        def _do_anthropic_call():
+            resp = client.messages.create(**anth_kwargs)
+            blocks = getattr(resp, "content", None) or []
+            texts = [
+                b.get("text", "") if isinstance(b, dict) else getattr(b, "text", "")
+                for b in blocks
+                if (b.get("type") if isinstance(b, dict) else getattr(b, "type", "text")) == "text"
+            ]
+            return "".join(texts)
+
+        return _record_usage("anthropic", target_model, prompt_str, _execute_with_retry(_do_anthropic_call, **kwargs), t_start)
 
     openai_compatible_providers = (
         "openai", "open_ai", "openai-compatible", "openai_compatible", "openai-compat",
@@ -340,13 +416,13 @@ def call_llm(
             }
             base_url = provider_base_urls.get(target_provider)
 
-        api_key = (
-            kwargs.get("api_key")
-            or Config.OPENAI_API_KEY
-            or os.getenv("OPENROUTER_API_KEY")
-            or os.getenv("GROQ_API_KEY")
-            or os.getenv("DEEPSEEK_API_KEY")
-        )
+        env_key_map = {
+            "openrouter": "OPENROUTER_API_KEY",
+            "groq": "GROQ_API_KEY",
+            "deepseek": "DEEPSEEK_API_KEY",
+        }
+        provider_env_key = os.getenv(env_key_map[target_provider]) if target_provider in env_key_map else None
+        api_key = kwargs.get("api_key") or Config.OPENAI_API_KEY or provider_env_key
         if target_provider in ("ollama", "localai", "vllm") and not api_key:
             api_key = "dummy_local_key"
 
@@ -390,7 +466,7 @@ def call_llm(
             "api_key", "base_url", "organization", "max_retries", "initial_delay",
             "backoff_factor", "system_instruction", "max_output_tokens", "config",
             "category", "archetype", "target_file", "target_class", "target_cls",
-            "action", "repair_diff", "repair_tests", "is_repair", "spec"
+            "action", "repair_diff", "repair_tests", "is_repair", "spec", "language"
         )
         for k, v in kwargs.items():
             if k not in non_openai_keys:
@@ -422,7 +498,7 @@ def call_llm(
                         return str(choice_text)
             return ""
 
-        return _execute_with_retry(_do_openai_call, **kwargs)
+        return _record_usage(target_provider, target_model, prompt_str, _execute_with_retry(_do_openai_call, **kwargs), t_start)
 
     raise ValueError(f"Unknown LLM provider: {target_provider}")
 
@@ -696,8 +772,9 @@ except ImportError:
     import sys
     sys.path.insert(0, ".")
     sys.path.insert(0, "src")
-    if "{dir_name}":
-        sys.path.insert(0, "{dir_name}")
+    # Support src/ layout: import from package root, not module subfolder
+    if "{dir_name}".startswith("src"):
+        sys.path.insert(0, "{dir_name}".split("/src/")[0] if "/src/" in "{dir_name}" else ".")
     from {module_name} import {target_cls}
 
 def _instantiate():

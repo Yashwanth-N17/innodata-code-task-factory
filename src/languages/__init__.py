@@ -4,6 +4,9 @@ from .base import BaseLanguageAdapter, DEFAULT_IGNORED_DIRS, parse_junit_xml
 from .python import PythonAdapter, MethodSignature
 from .typescript import TypeScriptAdapter
 from .cpp import CppAdapter
+from .go import GoAdapter
+from .rust import RustAdapter
+from .java import JavaAdapter
 from .registry import LanguageRegistry
 
 __all__ = [
@@ -14,5 +17,8 @@ __all__ = [
     "MethodSignature",
     "TypeScriptAdapter",
     "CppAdapter",
+    "GoAdapter",
+    "RustAdapter",
+    "JavaAdapter",
     "LanguageRegistry",
 ]

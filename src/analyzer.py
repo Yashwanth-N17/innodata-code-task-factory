@@ -107,7 +107,7 @@ class CodebaseAnalyzer:
         default_ext = self.adapter.source_extensions[0] if self.adapter.source_extensions else ".py"
         return {"file": f"main{default_ext}", "class_name": "App", "content": ""}
 
-    def get_context_prompt(self, max_classes: int = 40, max_functions: int = 40) -> str:
+    def get_context_prompt(self, max_classes: int = 40, max_functions: int = 40, target_offset: int = 0) -> str:
         """Tier 1: Format parsed repo blueprint into a SpecGenerator-safe summary (no line numbers)."""
         scan_data = self.scan()
         files = scan_data["files"]
@@ -141,8 +141,9 @@ class CodebaseAnalyzer:
         lines.extend(manifest_notes)
         lines.append("\nClasses and Public Methods:")
 
-        # Prioritize classes from top target files first so large repos keep their core API visible
-        target_set = set(scan_data.get("target_files") or [])
+        # Rotate priority target files when generating batches so each task covers a distinct module
+        rotated_targets = self._rotated_targets(scan_data, max_files=3, target_offset=target_offset)
+        target_set = set(rotated_targets)
         ordered_classes = sorted(
             scan_data["classes"],
             key=lambda c: (0 if c.get("file") in target_set else 1),
@@ -178,16 +179,43 @@ class CodebaseAnalyzer:
 
         return "\n".join(lines)
 
-    def get_targeted_context(self, max_files: int = 3, max_lines_per_file: int = 250) -> str:
-        """Tier 2: Return Tier 1 blueprint plus numbered source code of target modules & sample test."""
+    def _rotated_targets(self, scan_data: Dict[str, Any], max_files: int = 3, target_offset: int = 0) -> List[str]:
+        all_ranked = self.adapter.select_targets(
+            self.repo_path, scan_data, max_files=max(max_files, len(scan_data.get("files") or []))
+        )
+        if not all_ranked:
+            return []
+        if target_offset > 0 and len(all_ranked) > 1:
+            shift = target_offset % len(all_ranked)
+            all_ranked = all_ranked[shift:] + all_ranked[:shift]
+        return all_ranked[:max_files]
+
+    def get_targeted_context(self, max_files: int = 3, max_lines_per_file: int = 250, target_offset: int = 0) -> str:
+        """Tier 2: Return Tier 1 blueprint plus manifest constraints, numbered source code, and sample test."""
         scan_data = self.scan()
-        tier1 = self.get_context_prompt()
-        target_files = self.adapter.select_targets(self.repo_path, scan_data, max_files=max_files)
+        tier1 = self.get_context_prompt(target_offset=target_offset)
+        target_files = self._rotated_targets(scan_data, max_files=max_files, target_offset=target_offset)
         source_blocks = self.adapter.format_numbered_source(
             self.repo_path, target_files, max_lines_per_file=max_lines_per_file
         )
 
         sections = [tier1]
+        manifest = scan_data.get("manifest") or {}
+        constraints: List[str] = []
+        if manifest.get("filterwarnings"):
+            constraints.append(f"- pytest filterwarnings: {manifest['filterwarnings']} (tests must emit zero warnings)")
+        if manifest.get("src_layout"):
+            constraints.append("- Package uses `src/` layout; import public package names directly without `src.` prefix.")
+        if manifest.get("workspace_packages"):
+            ws_names = ", ".join(f"{p['name']} ({p['path']})" for p in manifest["workspace_packages"][:8])
+            constraints.append(f"- Monorepo workspace packages: {ws_names}")
+        if manifest.get("jsontest_detected"):
+            constraints.append("- Repository uses CMake/CTest; place new test in `tests/test_feature_patch.cpp` with standalone `int main()`.")
+        if manifest.get("cmake_targets"):
+            constraints.append(f"- Available CMake targets: {', '.join(manifest['cmake_targets'])}")
+        if constraints:
+            sections.append("## Build & Test Constraints\n" + "\n".join(constraints))
+
         if source_blocks:
             sections.append(f"## Target Source Files (Numbered Lines for Exact Diffing)\n{source_blocks}")
 
