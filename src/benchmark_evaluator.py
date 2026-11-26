@@ -71,7 +71,7 @@ import logging
 import os
 import re
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 try:
     import tomllib  # Built into Python 3.11+
@@ -175,11 +175,41 @@ class BenchmarkEvaluator:
                         return nested[key]
         return "unknown"
 
-    def _invoke_model(self, user_prompt: str, model_name: str) -> str:
+    def _build_prompts(self, repo_context: str, instruction_md: str) -> Tuple[str, str]:
+        """Build `(system_prompt, user_prompt)` cleanly without leaving unformatted placeholders."""
+        template = self.eval_prompt_template
+        if "{codebase_context}" in template or "{instruction_md}" in template:
+            rendered = (
+                template
+                .replace("{codebase_context}", repo_context)
+                .replace("{instruction_md}", instruction_md)
+            )
+            system_prompt = (
+                "# FEATURE: Feature 8 - Frontier AI Benchmark Evaluator\n"
+                "# LOADED BY: src/benchmark_evaluator.py\n"
+                "You are an expert software engineer. Follow the specification and output ONLY a valid unified Git diff."
+            )
+            return system_prompt, rendered
+
+        user_prompt = (
+            f"Target Codebase Context:\n{repo_context}\n\n"
+            f"Task Specification (instruction.md):\n{instruction_md}\n"
+        )
+        return template, user_prompt
+
+    def _invoke_model(
+        self,
+        user_prompt: str,
+        model_name: str,
+        system_prompt: Optional[str] = None,
+    ) -> str:
         """
         Adaptively call src.config.call_llm() with exponential-backoff retry.
         Inspects its signature so model_name and system_prompt are forwarded
         only when supported by the current config.py implementation.
+
+        for now it is just calling placeholder texts and running mock tests,
+        but it is supposed to call actual LLM APIs and return response text
         """
         sig = inspect.signature(call_llm)
         params = sig.parameters
@@ -187,13 +217,18 @@ class BenchmarkEvaluator:
             p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
         )
 
+        active_system_prompt = (
+            self.eval_prompt_template if system_prompt is None else system_prompt
+        )
         call_kwargs: Dict[str, Any] = {}
 
         if "system_prompt" in params or accepts_kwargs:
-            call_kwargs["system_prompt"] = self.eval_prompt_template
+            call_kwargs["system_prompt"] = active_system_prompt
             call_kwargs["prompt"] = user_prompt
         else:
-            call_kwargs["prompt"] = f"{self.eval_prompt_template}\n\n{user_prompt}"
+            call_kwargs["prompt"] = (
+                f"{active_system_prompt}\n\n{user_prompt}" if active_system_prompt else user_prompt
+            )
 
         if "model" in params or accepts_kwargs:
             call_kwargs["model"] = model_name
@@ -286,7 +321,8 @@ class BenchmarkEvaluator:
         model_name: str = "claude-3-5-sonnet",
         task_dir: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Evaluate a single AI model against one packaged task directory."""
+        """Evaluate a single AI model against one packaged task directory. 
+        Evaluating it using Pass@1, the number of passed tests and the failure reason if any will be shown"""
         active_task_dir = os.path.abspath(task_dir) if task_dir else self.task_dir
         if not active_task_dir:
             raise ValueError("A task_dir must be provided either in __init__ or evaluate_model().")
@@ -327,14 +363,15 @@ class BenchmarkEvaluator:
 
         # Step 1: Assemble context + specification (never expose solution.diff or tests)
         repo_context = self._get_repo_context()
-        user_prompt = (
-            f"Target Codebase Context:\n{repo_context}\n\n"
-            f"Task Specification (instruction.md):\n{instruction_md}\n"
-        )
+        system_prompt, user_prompt = self._build_prompts(repo_context, instruction_md)
 
         start_time = time.perf_counter()
         try:
-            raw_response = self._invoke_model(user_prompt=user_prompt, model_name=model_name)
+            raw_response = self._invoke_model(
+                user_prompt=user_prompt,
+                model_name=model_name,
+                system_prompt=system_prompt,
+            )
         except Exception as exc:
             audit["latency_seconds"] = round(time.perf_counter() - start_time, 3)
             audit["failure_reason"] = "api_error"
