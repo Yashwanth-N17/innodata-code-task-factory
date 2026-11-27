@@ -14,7 +14,14 @@ import uuid
 
 from src.analyzer import CodebaseAnalyzer
 from src.coder_agent import CoderAgent
-from src.config import Config, get_usage_stats, reset_usage_stats
+from src.config import (
+    Config,
+    LLMProviderError,
+    ProviderConfigurationError,
+    ProviderDependencyError,
+    get_usage_stats,
+    reset_usage_stats,
+)
 from src.exporter import check_test_mutation_rigor, export_swebench_jsonl
 from src.languages import LanguageRegistry
 from src.packager import TaskPackager
@@ -43,6 +50,11 @@ def _is_test_side_failure(err_msg: str) -> bool:
 
 
 def main():
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(encoding="utf-8", errors="replace")
+
     parser = argparse.ArgumentParser(
         description="InnoData Automated Coding Task Factory (Track 1)"
     )
@@ -123,10 +135,12 @@ def main():
     variation_ctrl = VariationController()
 
     categories = variation_ctrl.select_category(count=args.count, language=analyzer.language)
-    verified_tasks = []
+    task_results = []
 
     for idx, cat in enumerate(categories, 1):
         task_id = f"task_{int(time.time())}_{idx:03d}_{cat['id']}_{uuid.uuid4().hex[:6]}"
+        task_stage = "specification"
+        task_status = "GENERATION_FAILURE"
         try:
             print(f"\n[Phase 2.{idx}] Generating Task #{idx}: {cat['name']}")
             print(f" Archetype: {cat['description']}")
@@ -146,62 +160,112 @@ def main():
 
             # Step B: Reference Code & Tests (Tier 1 + Tier 2 numbered source)
             print("  -> Generating reference solution (solution.diff)...")
+            task_stage = "code_generation"
             solution_diff = coder.generate_diff(codebase_context=coder_context, instruction_md=instruction_md)
 
             print(f"  -> Generating test suite ({analyzer.adapter.test_file_relpath})...")
+            task_stage = "test_generation"
             test_code = tester.generate_tests(codebase_context=coder_context, instruction_md=instruction_md)
 
             # Step C: Verification with Self-Correction Retry Loop
             print("  -> Running SWE-bench 3-Step Verification Matrix...")
+            task_stage = "verification"
             verification = verifier.verify(solution_diff=solution_diff, test_code=test_code)
+            task_status = "VERIFIED" if verification.is_valid else "FAILED_VERIFICATION"
 
             max_repairs = 2
             repair_attempt = 0
-            if not verification.step1_baseline_pass:
+            baseline_outcome = getattr(verification, "step1_outcome", None)
+            baseline_allows_verification = (
+                baseline_outcome in ("PASS", "NO_TESTS_FOUND")
+                if baseline_outcome is not None
+                else verification.step1_baseline_pass
+            )
+            if baseline_outcome == "NO_TESTS_FOUND":
+                print("     [Baseline] No existing tests found; requiring generated-test fail-to-pass evidence.")
+            elif not verification.step1_baseline_pass:
                 print("     [Repo Setup Error] Baseline test suite failed; skipping self-healing repairs.")
-            while not verification.is_valid and repair_attempt < max_repairs and verification.step1_baseline_pass:
+            while not verification.is_valid and repair_attempt < max_repairs and baseline_allows_verification:
                 repair_attempt += 1
-                if not verification.patch_applied_cleanly:
-                    err_msg = verification.logs.get("patch_application", "Patch failed to apply.")
-                    print(f"     [Self-Healing] Patch failure detected. Requesting CoderAgent repair ({repair_attempt}/{max_repairs})...")
-                    solution_diff = coder.repair_diff(
-                        codebase_context=coder_context,
-                        instruction_md=instruction_md,
-                        previous_diff=solution_diff,
-                        error_message=err_msg,
-                    )
-                elif not verification.step3_positive_pass:
-                    err_msg = verification.logs.get("step3_positive_check", "Tests failed.")
-                    if _is_test_side_failure(err_msg):
-                        print(f"     [Self-Healing] Test-side compile/import error detected. Requesting TestAgent repair ({repair_attempt}/{max_repairs})...")
-                        test_code = tester.repair_tests(
-                            codebase_context=coder_context,
-                            instruction_md=instruction_md,
-                            previous_tests=test_code,
-                            error_message=err_msg,
-                        )
-                    else:
-                        print(f"     [Self-Healing] Step 3 failure detected. Requesting CoderAgent repair ({repair_attempt}/{max_repairs})...")
+                task_stage = "repair_generation"
+                try:
+                    if not verification.patch_applied_cleanly:
+                        err_msg = verification.logs.get("patch_application", "Patch failed to apply.")
+                        print(f"     [Self-Healing] Patch failure detected. Requesting CoderAgent repair ({repair_attempt}/{max_repairs})...")
                         solution_diff = coder.repair_diff(
                             codebase_context=coder_context,
                             instruction_md=instruction_md,
-                            previous_diff=solution_diff,
-                            error_message=err_msg,
+                            rejected_diff=solution_diff,
+                            error_feedback=err_msg,
                         )
-                elif not verification.step2_negative_fail:
-                    err_msg = "Negative check failed: tests passed on unpatched code (false positive)."
-                    print(f"     [Self-Healing] Test validity failure detected. Requesting TestAgent repair ({repair_attempt}/{max_repairs})...")
-                    test_code = tester.repair_tests(
-                        codebase_context=coder_context,
-                        instruction_md=instruction_md,
-                        previous_tests=test_code,
-                        error_message=err_msg,
+                    elif not verification.step3_positive_pass:
+                        err_msg = verification.logs.get("step3_positive_check", "Tests failed.")
+                        if _is_test_side_failure(err_msg):
+                            print(f"     [Self-Healing] Test-side compile/import error detected. Requesting TestAgent repair ({repair_attempt}/{max_repairs})...")
+                            test_code = tester.repair_tests(
+                                codebase_context=coder_context,
+                                instruction_md=instruction_md,
+                                rejected_tests=test_code,
+                                error_feedback=err_msg,
+                            )
+                        else:
+                            print(f"     [Self-Healing] Step 3 failure detected. Requesting CoderAgent repair ({repair_attempt}/{max_repairs})...")
+                            solution_diff = coder.repair_diff(
+                                codebase_context=coder_context,
+                                instruction_md=instruction_md,
+                                rejected_diff=solution_diff,
+                                error_feedback=err_msg,
+                            )
+                    elif not verification.step2_negative_fail:
+                        err_msg = "Negative check failed: tests passed on unpatched code (false positive)."
+                        print(f"     [Self-Healing] Test validity failure detected. Requesting TestAgent repair ({repair_attempt}/{max_repairs})...")
+                        test_code = tester.repair_tests(
+                            codebase_context=coder_context,
+                            instruction_md=instruction_md,
+                            rejected_tests=test_code,
+                            error_feedback=err_msg,
+                        )
+                except (LLMProviderError, ProviderConfigurationError, ProviderDependencyError) as exc:
+                    task_status = "PROVIDER_FAILURE"
+                    if isinstance(exc, LLMProviderError):
+                        status = exc.status if exc.status is not None else "unknown"
+                        details = (
+                            f"provider={exc.provider} model={exc.model} "
+                            f"attempts={exc.attempts} error_type={exc.error_type} status={status}"
+                        )
+                    else:
+                        details = (
+                            f"provider={exc.provider} model={exc.model} "
+                            f"error_type={type(exc).__name__}"
+                        )
+                    print(
+                        f"     [Self-Healing] Provider failure during repair generation "
+                        f"({repair_attempt}/{max_repairs}): {details}"
                     )
+                    break
+                except Exception as exc:
+                    task_status = "GENERATION_FAILURE"
+                    print(
+                        f"     [Self-Healing] Repair generation failed "
+                        f"({repair_attempt}/{max_repairs}): error_type={type(exc).__name__}"
+                    )
+                    break
 
                 print(f"     -> Re-verifying repaired artifacts (Attempt {repair_attempt})...")
+                task_stage = "verification"
                 verification = verifier.verify(solution_diff=solution_diff, test_code=test_code)
+                task_status = "VERIFIED" if verification.is_valid else "FAILED_VERIFICATION"
+                baseline_outcome = getattr(verification, "step1_outcome", None)
+                baseline_allows_verification = (
+                    baseline_outcome in ("PASS", "NO_TESTS_FOUND")
+                    if baseline_outcome is not None
+                    else verification.step1_baseline_pass
+                )
 
-            print(f"     [1] Baseline Existing Tests: {'PASS' if verification.step1_baseline_pass else 'FAIL'}")
+            baseline_label = baseline_outcome or (
+                "PASS" if verification.step1_baseline_pass else "FAIL"
+            )
+            print(f"     [1] Baseline Existing Tests: {baseline_label}")
             print(f"     [2] Negative Check (Fail-to-Pass): {'FAIL (Verified)' if verification.step2_negative_fail else 'PASS (Invalid: False Positive)'}")
             print(f"     [3] Positive Check (Pass-to-Pass): {'PASS' if verification.step3_positive_pass else 'FAIL'}")
 
@@ -210,6 +274,7 @@ def main():
                 rigor = check_test_mutation_rigor(verifier, solution_diff, test_code)
                 print(f"     [Rigor Audit] {rigor['note']}")
 
+            task_stage = "packaging"
             package_dir = packager.package(
                 task_id=task_id,
                 repo_name=repo_meta.get("repo_name") or os.path.basename(repo_path),
@@ -222,19 +287,53 @@ def main():
                 manifest=scan_data.get("manifest"),
                 repo_meta=repo_meta,
                 rigor_check=rigor,
+                repo_path=repo_path,
             )
             print(f"  -> Packaged into: {package_dir}")
-            verified_tasks.append((task_id, verification.is_valid))
-        except Exception as e:
-            print(f"  -> [ERROR] Task {idx} failed: {e}")
-            verified_tasks.append((task_id, False))
+            task_results.append((task_id, task_status))
+        except (LLMProviderError, ProviderConfigurationError, ProviderDependencyError) as exc:
+            if isinstance(exc, LLMProviderError):
+                status = exc.status if exc.status is not None else "unknown"
+                details = (
+                    f"provider={exc.provider} model={exc.model} "
+                    f"attempts={exc.attempts} error_type={exc.error_type} status={status}"
+                )
+            else:
+                details = (
+                    f"provider={exc.provider} model={exc.model} "
+                    f"error_type={type(exc).__name__}"
+                )
+            task_results.append((task_id, "PROVIDER_FAILURE"))
+            print(
+                f"  -> [PROVIDER_FAILURE] Task {idx} failed during "
+                f"{task_stage}: {details}"
+            )
+            continue
+        except Exception as exc:
+            failure_status = {
+                "verification": "VERIFICATION_FAILURE",
+                "packaging": "PACKAGING_FAILURE",
+            }.get(task_stage, "GENERATION_FAILURE")
+            task_results.append((task_id, failure_status))
+            print(
+                f"  -> [{failure_status}] Task {idx} failed during "
+                f"{task_stage}: error_type={type(exc).__name__}"
+            )
             continue
 
     print("\n" + "=" * 65)
     print(" 📊 FACTORY EXECUTION SUMMARY")
     print("=" * 65)
-    for tid, is_valid in verified_tasks:
-        status_str = "✅ VERIFIED & VALID" if is_valid else "⚠️ FAILED VERIFICATION"
+    status_labels = {
+        "VERIFIED": "✅ VERIFIED & VALID",
+        "FAILED_VERIFICATION": "⚠️ FAILED VERIFICATION",
+        "PROVIDER_FAILURE": "⚠️ PROVIDER FAILURE",
+        "GENERATION_FAILURE": "⚠️ TASK GENERATION FAILURE",
+        "VERIFICATION_FAILURE": "⚠️ VERIFICATION FAILURE",
+        "PACKAGING_FAILURE": "⚠️ PACKAGING FAILURE",
+    }
+    for tid, status in task_results:
+        status_str = status_labels.get(status, status)
         print(f" • {tid}: {status_str}")
 
     var_report = variation_ctrl.get_variation_report()
@@ -242,15 +341,20 @@ def main():
     print("\n[Phase 3] Meaningful Variation & Telemetry Report:")
     print(f" Diversity Score : {var_report['diversity_score'] * 100}%")
     print(f" Distribution    : {var_report['distribution']}")
-    print(f" LLM Calls       : {usage['total_calls']} (est. {usage['est_input_tokens']} in / {usage['est_output_tokens']} out tokens, {usage['total_latency_ms']} ms)")
+    print(
+        f" LLM Requests    : {usage['total_attempts']} attempts "
+        f"({usage['successful_calls']} successful calls, {usage['failed_calls']} failed calls, "
+        f"{usage['total_latency_ms']} ms elapsed; "
+        f"est. {usage['est_input_tokens']} in / {usage['est_output_tokens']} out tokens)"
+    )
 
     if args.export_jsonl:
         exp = export_swebench_jsonl(args.output, args.export_jsonl)
         print(f" Exported JSONL  : {exp['exported_count']} verified tasks -> {exp['output_path']}")
     print("=" * 65)
 
-    valid_count = sum(1 for _, v in verified_tasks if v)
-    if args.count and args.count > 0 and valid_count == 0 and len(verified_tasks) > 0:
+    valid_count = sum(1 for _, status in task_results if status == "VERIFIED")
+    if args.count and args.count > 0 and valid_count == 0 and len(task_results) > 0:
         sys.exit(1)
 
 

@@ -19,7 +19,7 @@ from unittest.mock import MagicMock, patch
 from run_factory import _is_test_side_failure
 from src.analyzer import CodebaseAnalyzer
 from src.benchmark_evaluator import BatchBenchmarkRunner, BenchmarkEvaluator, infer_provider
-from src.config import Config, call_llm, get_usage_stats, reset_usage_stats
+from src.config import Config, LLMProviderError, call_llm, get_usage_stats, reset_usage_stats
 from src.exporter import check_test_mutation_rigor, export_swebench_jsonl
 from src.languages import CppAdapter, GoAdapter, JavaAdapter, LanguageRegistry, PythonAdapter, RustAdapter, TypeScriptAdapter
 from src.languages.treesitter_helper import extract_symbols_with_treesitter, is_treesitter_available
@@ -65,8 +65,11 @@ class PhaseALiveHardeningTests(unittest.TestCase):
             json.dump({"name": "@zod/mini"}, f)
 
         # Simulate pnpm/npm workspace symlinks inside repo/node_modules
-        os.symlink(pkg_zod, os.path.join(nm_root, "zod"), target_is_directory=True)
-        os.symlink(pkg_mini, os.path.join(nm_scoped, "mini"), target_is_directory=True)
+        try:
+            os.symlink(pkg_zod, os.path.join(nm_root, "zod"), target_is_directory=True)
+            os.symlink(pkg_mini, os.path.join(nm_scoped, "mini"), target_is_directory=True)
+        except OSError as exc:
+            self.skipTest(f"Directory symlink creation is unavailable: {exc}")
 
         work_dir = os.path.join(self.tmp, "sandbox_step3")
         shutil.copytree(repo, work_dir, ignore=shutil.ignore_patterns("node_modules"))
@@ -204,7 +207,9 @@ class PhaseBBenchmarkAndAnthropicTests(unittest.TestCase):
             )
 
         self.assertEqual(out, "claude diff output")
-        mock_anthropic_mod.Anthropic.assert_called_once_with(api_key="anth_test_key", timeout=60.0)
+        mock_anthropic_mod.Anthropic.assert_called_once_with(
+            api_key="anth_test_key", timeout=60.0, max_retries=0
+        )
         mock_client.messages.create.assert_called_once_with(
             model="claude-3-5-sonnet-20241022",
             max_tokens=1024,
@@ -216,6 +221,27 @@ class PhaseBBenchmarkAndAnthropicTests(unittest.TestCase):
         stats = get_usage_stats()
         self.assertEqual(stats["total_calls"], 1)
         self.assertIn("anthropic:claude-3-5-sonnet-20241022", stats["by_model"])
+
+    def test_benchmark_does_not_repeat_exhausted_transient_provider_retries(self):
+        class GeminiUnavailable(Exception):
+            code = 503
+
+        failure = LLMProviderError(
+            "gemini",
+            "gemini-test",
+            GeminiUnavailable("temporary outage"),
+            attempts=4,
+        )
+        evaluator = BenchmarkEvaluator.__new__(BenchmarkEvaluator)
+        evaluator.eval_prompt_template = "benchmark system prompt"
+
+        with patch("src.benchmark_evaluator.call_llm", side_effect=failure) as mocked_call:
+            with patch("src.benchmark_evaluator.time.sleep") as sleep_mock:
+                with self.assertRaises(LLMProviderError):
+                    evaluator._invoke_model("Task prompt", "gemini-test")
+
+        mocked_call.assert_called_once()
+        sleep_mock.assert_not_called()
 
     def test_infer_provider_respects_live_and_mock_modes(self):
         Config.LLM_PROVIDER = "gemini"
@@ -346,7 +372,7 @@ class PhaseCUniversalLanguagesAndDockerTests(unittest.TestCase):
     def test_docker_sandbox_command_and_unavailable_guard(self):
         with patch("src.sandbox_docker.DockerSandboxRunner.is_available", return_value=False):
             with self.assertRaises(RuntimeError):
-                SandboxVerifier(self.tmp, sandbox="docker")
+                SandboxVerifier(self.tmp, language="python", sandbox="docker")
 
         with patch("src.sandbox_docker.shutil.which", return_value="/usr/bin/docker"), \
              patch("src.sandbox_docker.subprocess.run") as mock_run:
@@ -381,7 +407,11 @@ class PhaseDExporterAndRigorTests(unittest.TestCase):
             " def ping():\n     return 'pong'\n+\n"
             "+def is_active():\n+    return True\n"
         )
-        test_code = "from auth import is_active\ndef test_active():\n    assert is_active() is True\n"
+        test_code = (
+            "import auth\n\n"
+            "def test_active():\n"
+            "    assert hasattr(auth, 'is_active') and auth.is_active() is True\n"
+        )
 
         verifier = SandboxVerifier(repo)
         res = verifier.verify(diff, test_code)

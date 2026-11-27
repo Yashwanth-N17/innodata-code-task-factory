@@ -57,7 +57,7 @@ class LanguageRegistry:
 
     @classmethod
     def detect(cls, repo_path: str) -> Tuple[BaseLanguageAdapter, Dict[str, int]]:
-        """Score every registered adapter against repo_path and return the best match."""
+        """Score registered adapters and reject unsupported or ambiguous repositories."""
         scores: Dict[str, int] = {}
         for lang_id, adapter_cls in cls._ADAPTERS.items():
             try:
@@ -66,9 +66,21 @@ class LanguageRegistry:
                 scores[lang_id] = 0
 
         if not scores or max(scores.values()) == 0:
-            return PythonAdapter(), scores
+            raise ValueError(
+                f"Could not detect a supported language for repository '{repo_path}'. "
+                "Specify a language explicitly."
+            )
 
-        best_lang = max(scores.keys(), key=lambda k: (scores[k], k == "python"))
+        best_score = max(scores.values())
+        best_languages = [lang for lang, score in scores.items() if score == best_score]
+        if len(best_languages) > 1:
+            choices = ", ".join(sorted(best_languages))
+            raise ValueError(
+                f"Ambiguous language detection for repository '{repo_path}': "
+                f"{choices} scored equally. Specify a language explicitly."
+            )
+
+        best_lang = best_languages[0]
         return cls._ADAPTERS[best_lang](), scores
 
     @classmethod

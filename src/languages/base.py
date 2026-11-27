@@ -7,6 +7,8 @@ import os
 import re
 import xml.etree.ElementTree as ET
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 
@@ -18,20 +20,152 @@ DEFAULT_IGNORED_DIRS: Set[str] = {
 }
 
 
-def parse_junit_xml(xml_path: str) -> Dict[str, str]:
-    """Return {test_id: 'passed'|'failed'|'error'|'skipped'} from any standard JUnit XML file."""
-    results: Dict[str, str] = {}
+class TestRunOutcome(str, Enum):
+    PASS = "PASS"
+    FAIL = "FAIL"
+    NO_TESTS_FOUND = "NO_TESTS_FOUND"
+    ERROR = "ERROR"
+
+
+class SandboxPreparationError(RuntimeError):
+    pass
+
+
+class TestResultMap(dict):
+    """Dictionary-compatible test results with report integrity metadata."""
+
+    def __init__(self):
+        super().__init__()
+        self.discovered_count: Optional[int] = None
+        self.report_error: Optional[str] = None
+        self.report_warnings: List[str] = []
+        self.report_present = False
+        self.no_tests_found = False
+
+
+@dataclass
+class TestRunEvidence:
+    outcome: TestRunOutcome
+    discovered_count: int
+    executed_count: int
+    passed_count: int
+    failed_count: int
+    skipped_count: int
+    error_count: int
+    test_results: Dict[str, str] = field(default_factory=dict)
+    exit_code: int = 0
+    diagnostics: str = ""
+
+    @property
+    def failed_test_ids(self) -> List[str]:
+        return sorted(test_id for test_id, status in self.test_results.items() if status == "failed")
+
+    @property
+    def passed_test_ids(self) -> List[str]:
+        return sorted(test_id for test_id, status in self.test_results.items() if status == "passed")
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "outcome": self.outcome.value,
+            "discovered_count": self.discovered_count,
+            "executed_count": self.executed_count,
+            "passed_count": self.passed_count,
+            "failed_count": self.failed_count,
+            "skipped_count": self.skipped_count,
+            "error_count": self.error_count,
+            "test_results": dict(self.test_results),
+            "exit_code": self.exit_code,
+            "diagnostics": self.diagnostics,
+        }
+
+
+def parse_junit_xml(
+    xml_path: str,
+    *,
+    vitest_compatibility: bool = False,
+) -> TestResultMap:
+    """Return test IDs and statuses while retaining report parse metadata."""
+    results = TestResultMap()
     if not xml_path or not os.path.isfile(xml_path):
+        results.report_error = "JUnit XML report is missing."
         return results
     try:
+        if os.path.getsize(xml_path) == 0:
+            results.report_error = "JUnit XML report is empty."
+            return results
         root = ET.parse(xml_path).getroot()
-    except Exception:
+    except (ET.ParseError, OSError) as exc:
+        results.report_error = f"JUnit XML report could not be parsed: {exc}"
         return results
 
-    for case in root.iter("testcase"):
+    results.report_present = True
+    root_tag = root.tag.rsplit("}", 1)[-1]
+    if root_tag not in ("testsuite", "testsuites"):
+        results.report_error = f"JUnit XML report has unexpected root element '{root.tag}'."
+        return results
+
+    cases = [
+        element for element in root.iter()
+        if element.tag.rsplit("}", 1)[-1] == "testcase"
+    ]
+    results.discovered_count = len(cases)
+    declared_tests = root.get("tests")
+    if declared_tests is not None:
+        try:
+            if int(declared_tests) != len(cases):
+                results.report_error = (
+                    f"JUnit XML report declares {declared_tests} tests but contains "
+                    f"{len(cases)} test cases."
+                )
+        except ValueError:
+            results.report_error = "JUnit XML report has an invalid test count."
+
+    unnamed_counts: Dict[str, int] = {}
+    identity_counts: Dict[str, int] = {}
+    duplicate_occurrences = 0
+    duplicate_identity_count = 0
+    for case in cases:
         classname = (case.get("classname") or "").strip()
         name = (case.get("name") or "").strip()
+        if not name:
+            if not vitest_compatibility:
+                results.report_error = (
+                    "JUnit XML report contains a test case without a nonblank name."
+                )
+                continue
+            identity_source = classname or (case.get("file") or "").strip()
+            if not identity_source:
+                results.report_error = (
+                    "JUnit XML report contains an unnamed test case without a classname "
+                    "or file identity."
+                )
+                continue
+            unnamed_counts[identity_source] = unnamed_counts.get(identity_source, 0) + 1
+            name = f"[unnamed testcase {unnamed_counts[identity_source]}]"
+            results.report_warnings.append(
+                f"Preserved unnamed JUnit testcase from '{identity_source}' as '{name}'."
+            )
+            if not classname:
+                classname = identity_source
         test_id = f"{classname}::{name}" if classname else name
+        if test_id in results:
+            if not vitest_compatibility:
+                results.report_error = (
+                    f"JUnit XML report contains duplicate test identity '{test_id}'."
+                )
+                continue
+            duplicate_occurrences += 1
+            if identity_counts.get(test_id, 1) == 1:
+                duplicate_identity_count += 1
+            base_test_id = test_id
+            occurrence = identity_counts.get(base_test_id, 1) + 1
+            test_id = f"{base_test_id} [duplicate testcase {occurrence}]"
+            while test_id in results:
+                occurrence += 1
+                test_id = f"{base_test_id} [duplicate testcase {occurrence}]"
+            identity_counts[base_test_id] = occurrence
+        else:
+            identity_counts[test_id] = 1
         status = "passed"
         for child in case:
             if child.tag == "failure":
@@ -45,8 +179,12 @@ def parse_junit_xml(xml_path: str) -> Dict[str, str]:
                 break
         if status == "passed" and (case.get("status") or "").lower() in ("fail", "failed", "error"):
             status = "failed"
-        if test_id:
-            results[test_id] = status
+        results[test_id] = status
+    if duplicate_occurrences:
+        results.report_warnings.append(
+            f"Preserved {duplicate_occurrences} repeated Vitest testcase identities "
+            f"across {duplicate_identity_count} tests with stable suffixes."
+        )
     return results
 
 
@@ -159,6 +297,107 @@ class BaseLanguageAdapter(ABC):
     ) -> Tuple[int, str, Dict[str, str]]:
         """Execute tests in work_dir and return (exit_code, logs, per_test_results)."""
 
+    def has_no_tests_evidence(
+        self,
+        exit_code: int,
+        diagnostics: str,
+        results: Dict[str, str],
+    ) -> bool:
+        """Return True only when the framework explicitly reports no tests."""
+        return False
+
+    def canonical_test_id(self, test_id: str) -> str:
+        """Normalize runner-specific path separators without weakening identity matching."""
+        return re.sub(r"\s+", " ", (test_id or "").replace("\\", "/").strip())
+
+    def normalize_test_status(self, test_id: str, status: str) -> str:
+        return status.lower()
+
+    def is_test_executed_result(self, test_id: str, status: str) -> bool:
+        return status in ("passed", "failed")
+
+    def run_tests_detailed(
+        self,
+        work_dir: str,
+        target_test: Optional[str] = None,
+        timeout: int = 45,
+        **kwargs,
+    ) -> TestRunEvidence:
+        """Run the legacy runner once and classify its concrete test evidence."""
+        exit_code, diagnostics, raw_results = self.run_tests(
+            work_dir,
+            target_test=target_test,
+            timeout=timeout,
+            **kwargs,
+        )
+        return self.evidence_from_test_run(exit_code, diagnostics, raw_results)
+
+    def evidence_from_test_run(
+        self,
+        exit_code: int,
+        diagnostics: str,
+        raw_results: Dict[str, str],
+    ) -> TestRunEvidence:
+        """Classify one runner invocation without inferring discovery from an empty map."""
+        results = {
+            self.canonical_test_id(test_id): self.normalize_test_status(test_id, str(status))
+            for test_id, status in raw_results.items()
+        }
+        discovered_count = getattr(raw_results, "discovered_count", None)
+        if discovered_count is None:
+            discovered_count = len(results)
+        report_error = getattr(raw_results, "report_error", None)
+        explicit_no_tests = self.has_no_tests_evidence(exit_code, diagnostics, raw_results)
+        statuses = list(results.values())
+        passed_count = statuses.count("passed")
+        failed_count = statuses.count("failed")
+        skipped_count = statuses.count("skipped")
+        error_count = statuses.count("error")
+        executed_count = sum(
+            1
+            for test_id, status in results.items()
+            if self.is_test_executed_result(test_id, status)
+        )
+
+        if report_error and not (
+            explicit_no_tests and report_error.lower().endswith("is missing.")
+        ):
+            outcome = TestRunOutcome.ERROR
+            diagnostics = f"{diagnostics}\n{report_error}".strip()
+        elif explicit_no_tests and exit_code >= 0 and discovered_count == 0 and not statuses:
+            outcome = TestRunOutcome.NO_TESTS_FOUND
+        elif (
+            discovered_count != len(results)
+            or any(status not in ("passed", "failed", "skipped", "error") for status in statuses)
+            or error_count
+            or exit_code < 0
+        ):
+            outcome = TestRunOutcome.ERROR
+        elif failed_count:
+            outcome = TestRunOutcome.FAIL
+        elif exit_code != 0:
+            outcome = TestRunOutcome.ERROR
+        elif skipped_count and skipped_count == discovered_count:
+            outcome = TestRunOutcome.ERROR
+            diagnostics = f"{diagnostics}\nAll discovered tests were skipped.".strip()
+        elif passed_count:
+            outcome = TestRunOutcome.PASS
+        else:
+            outcome = TestRunOutcome.ERROR
+
+        return TestRunEvidence(
+            outcome=outcome,
+            discovered_count=discovered_count,
+            executed_count=executed_count,
+            passed_count=passed_count,
+            failed_count=failed_count,
+            skipped_count=skipped_count,
+            error_count=error_count,
+            test_results=results,
+            exit_code=exit_code,
+            diagnostics=diagnostics,
+        )
+
     @abstractmethod
     def is_real_failure(self, code: int, out: str) -> bool:
         """Return True if exit code/output indicates a legitimate test/feature failure (not tool crash)."""
@@ -198,8 +437,9 @@ class BaseLanguageAdapter(ABC):
     ) -> str:
         """Render standardized polyglot task.toml content."""
         def _esc(s):
-            return str(s).replace("\\\\", "\\\\\\\\").replace('"', '\\\\"')
+            return str(s).replace("\\", "\\\\").replace('"', '\\"')
         repo_meta = repo_meta or {}
+        test_file = self.test_file_relpath.replace("\\", "/")
         lines = [
             "# Task Package Configuration",
             f'task_id = "{_esc(task_id)}"',
@@ -229,8 +469,8 @@ class BaseLanguageAdapter(ABC):
         lines.extend([
             "",
             "[evaluation]",
-            f'fail_to_pass = ["{self.test_file_relpath}"]',
-            f'pass_to_pass = ["{os.path.dirname(self.test_file_relpath) or "."}/"]',
+            f'fail_to_pass = ["{test_file}"]',
+            f'pass_to_pass = ["{os.path.dirname(test_file) or "."}/"]',
             "",
         ])
         return "\n".join(lines)

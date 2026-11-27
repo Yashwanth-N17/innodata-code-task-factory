@@ -56,7 +56,7 @@ class ManualPatchTests(unittest.TestCase):
         patch = os.path.join(tmp, "p.patch")
         with open(patch, "w", encoding="utf-8", newline="\n") as f:
             f.write(diff)
-        code, msg = SandboxVerifier(tmp)._manual_apply_patch(tmp, patch)
+        code, msg = SandboxVerifier(tmp, language="python")._manual_apply_patch(tmp, patch)
         return tmp, code, msg
 
     def test_edit_inside_function(self):
@@ -110,7 +110,7 @@ BREAKING_DIFF = """--- a/calc.py
 +    return a - b
 """
 
-NEW_TEST = "from calc import sub\n\ndef test_sub():\n    assert sub(5, 2) == 3\n"
+NEW_TEST = "import calc\n\ndef test_sub():\n    assert calc.sub(5, 2) == 3\n"
 
 
 @unittest.skipUnless(_pytest_available(), "pytest is not installed in the python environment")

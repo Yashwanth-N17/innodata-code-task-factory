@@ -38,6 +38,8 @@ class CoderAgent:
 Task Specification (instruction.md):
 {instruction_md}
 
+{self._lang_hint()}
+
 Please generate the reference implementation that satisfies this specification.
 Return ONLY the unified git diff patch.
 """
@@ -80,6 +82,8 @@ Return ONLY the unified git diff patch.
 
 Task Specification (instruction.md):
 {instruction_md}
+
+{self._lang_hint()}
 
 The following unified git diff was previously rejected:
 
