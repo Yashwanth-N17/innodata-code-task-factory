@@ -287,6 +287,16 @@ class BaseLanguageAdapter(ABC):
             f.write(test_code)
         return path
 
+    def generated_test_relpath(
+        self, work_dir: Optional[str] = None, target_file: Optional[str] = None
+    ) -> str:
+        """Return the relative path for the generated acceptance test.
+
+        Default implementation returns ``test_file_relpath``. Subclasses may override
+        for workspace-aware placement (e.g. Vitest monorepos).
+        """
+        return self.test_file_relpath
+
     @abstractmethod
     def run_tests(
         self,

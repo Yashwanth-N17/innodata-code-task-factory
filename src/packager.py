@@ -44,6 +44,7 @@ class TaskPackager:
         repo_meta: Optional[Dict[str, str]] = None,
         rigor_check: Optional[Dict[str, Any]] = None,
         repo_path: str = "",
+        generated_test_relpath: Optional[str] = None,
     ) -> str:
         """Create a standardized SWE-bench task package directory.
 
@@ -60,6 +61,14 @@ class TaskPackager:
             test_code: Language-native acceptance test source code.
             verification: VerificationResult from SandboxVerifier.
             overwrite: Whether to replace an existing task directory.
+            language_adapter: Language adapter for the target language.
+            manifest: Repository manifest metadata.
+            repo_meta: Repository metadata (url, commit hash, etc.).
+            rigor_check: Optional rigor audit results.
+            repo_path: Path to the source repository.
+            generated_test_relpath: The generated test relative path, as
+                determined during verification. If not provided, falls back
+                to the adapter's default computed path.
 
         Returns:
             Absolute path to the created task directory.
@@ -105,8 +114,11 @@ class TaskPackager:
         language_adapter = language_adapter or PythonAdapter()
         manifest = manifest or {}
         repo_meta = repo_meta or {}
-        test_file_relpath = language_adapter.test_file_relpath.replace("\\", "/")
-        environment = language_adapter.get_environment_metadata(repo_path, manifest)
+        if generated_test_relpath:
+            test_file_relpath = generated_test_relpath.replace("\\", "/")
+        else:
+            test_file_relpath = language_adapter.generated_test_relpath(repo_path).replace("\\", "/")
+        environment = language_adapter.get_environment_metadata(repo_path, manifest, test_relpath=test_file_relpath)
         task_dir = os.path.join(self.output_root, task_id)
 
         # ---- Existing directory handling ----
