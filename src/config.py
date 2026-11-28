@@ -509,6 +509,10 @@ def _find_target_file_on_disk(target_file: Optional[str]) -> Optional[str]:
     if not target_file or not isinstance(target_file, str) or not target_file.strip():
         return None
     target_file = target_file.strip()
+    norm_target = target_file.replace("\\", "/")
+    target_dir = os.path.dirname(norm_target)
+    base = os.path.basename(norm_target)
+
     for path in [
         target_file,
         os.path.join("src", target_file),
@@ -517,27 +521,21 @@ def _find_target_file_on_disk(target_file: Optional[str]) -> Optional[str]:
         if os.path.isfile(path):
             return path
 
-    base = os.path.basename(target_file)
     for root, dirs, files in os.walk("."):
         dirs[:] = [d for d in dirs if d not in (".git", "__pycache__", ".tox", ".pytest_cache", ".eggs", "tasks")]
-        if base in files:
+        if target_dir and root.replace("\\", "/").endswith(target_dir) and base in files:
+            return os.path.join(root, base)
+        elif not target_dir and base in files:
             return os.path.join(root, base)
 
     try:
         temp_dir = tempfile.gettempdir()
-        with os.scandir(temp_dir) as entries:
-            for entry in entries:
-                if entry.is_dir() and entry.name.startswith("tmp"):
-                    candidate = os.path.join(entry.path, base)
-                    if os.path.isfile(candidate):
-                        return candidate
-                    try:
-                        with os.scandir(entry.path) as sub_entries:
-                            for sub in sub_entries:
-                                if sub.is_file() and sub.name == base:
-                                    return sub.path
-                    except OSError:
-                        pass
+        for root, dirs, files in os.walk(temp_dir):
+            dirs[:] = [d for d in dirs if d not in (".git", "__pycache__")]
+            if target_dir and root.replace("\\", "/").endswith(target_dir) and base in files:
+                return os.path.join(root, base)
+            elif not target_dir and base in files:
+                return os.path.join(root, base)
     except OSError:
         pass
 
@@ -682,9 +680,27 @@ def _generate_mock_diff(target_file: str, target_cls: str, archetype: str, is_re
                     class_idx = idx
                     break
             if class_idx is not None:
-                ctx_before = lines[class_idx : class_idx + 2]
-                ctx_after = lines[class_idx + 2 : class_idx + 4]
-                start_line = class_idx + 1
+                # Find the end of class docstring or class header so methods are inside class body
+                insert_idx = class_idx + 1
+                in_docstring = False
+                doc_quote = None
+                for j in range(class_idx + 1, min(len(lines), class_idx + 40)):
+                    l_str = lines[j].strip()
+                    if not in_docstring:
+                        if l_str.startswith('"""') or l_str.startswith("'''"):
+                            doc_quote = l_str[:3]
+                            in_docstring = True
+                            if len(l_str) > 3 and l_str.endswith(doc_quote):
+                                insert_idx = j + 1
+                                break
+                    else:
+                        if l_str.endswith(doc_quote) or doc_quote in l_str:
+                            insert_idx = j + 1
+                            break
+
+                ctx_before = lines[max(0, insert_idx - 2) : insert_idx]
+                ctx_after = lines[insert_idx : min(len(lines), insert_idx + 2)]
+                start_line = (insert_idx - len(ctx_before)) + 1
                 orig_count = len(ctx_before) + len(ctx_after)
                 new_count = orig_count + len(added_lines)
 
@@ -718,6 +734,10 @@ def _generate_mock_test(target_file: str, target_cls: str, archetype: str, is_re
     target_cls = str(target_cls).strip() if target_cls is not None and str(target_cls).strip() else "PaymentProcessor"
     module_name = os.path.splitext(os.path.basename(target_file))[0] or "service"
     dir_name = os.path.dirname(target_file)
+    clean_target = target_file.replace("\\", "/")
+    if clean_target.startswith("src/"):
+        clean_target = clean_target[4:]
+    pkg_module = os.path.splitext(clean_target)[0].replace("/", ".") or module_name
 
     test_bodies = {
         "new_feature": """    def test_feature_execution(self):
@@ -768,15 +788,21 @@ def _generate_mock_test(target_file: str, target_cls: str, archetype: str, is_re
 
     return f"""import unittest
 try:
-    from {module_name} import {target_cls}
+    from {pkg_module} import {target_cls}
 except ImportError:
-    import sys
-    sys.path.insert(0, ".")
-    sys.path.insert(0, "src")
-    # Support src/ layout: import from package root, not module subfolder
-    if "{dir_name}".startswith("src"):
-        sys.path.insert(0, "{dir_name}".split("/src/")[0] if "/src/" in "{dir_name}" else ".")
-    from {module_name} import {target_cls}
+    try:
+        from {module_name} import {target_cls}
+    except ImportError:
+        import sys
+        sys.path.insert(0, ".")
+        sys.path.insert(0, "src")
+        # Support src/ layout: import from package root, not module subfolder
+        if "{dir_name}".startswith("src"):
+            sys.path.insert(0, "{dir_name}".split("/src/")[0] if "/src/" in "{dir_name}" else ".")
+        try:
+            from {pkg_module} import {target_cls}
+        except ImportError:
+            from {module_name} import {target_cls}
 
 def _instantiate():
     for args in [("test", {{}}), ("test",), (), ("USD",), (1,)]:
