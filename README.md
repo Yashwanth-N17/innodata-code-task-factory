@@ -73,6 +73,17 @@ To prevent repetitive, trivial tasks (e.g. changing text or button colors), our 
 3. **State Mutation & Concurrency Bug Fix:** Fixes edge-case data corruption in shared collections.
 4. **Algorithmic Refactor & Optimization:** Improves runtime complexity while preserving full backward compatibility.
 
+### 4. Polyglot Multi-Language & Real-World Repository Support
+The factory natively supports polyglot codebases beyond synthetic toys. Tested and proven end-to-end on real, production open-source repositories:
+- 🐍 **Python (`pytest`):** Validated on [`pallets/click`](https://github.com/pallets/click) with `src/`-layout packaging and rich test fixtures.
+- ⚡ **TypeScript / JavaScript (`vitest` / Node `test` runner):** Validated on [`colinhacks/zod`](https://github.com/colinhacks/zod) with monorepo workspace package resolution, `--experimental-transform-types` enum support, and ambient dependency fallback.
+- ⚙️ **C++ (`cmake` & `ctest`):** Validated on [`open-source-parsers/jsoncpp`](https://github.com/open-source-parsers/jsoncpp) with header-guard-scoped symbol injection avoiding multi-translation-unit redefinition errors.
+- ☕ **Java (`maven` / `gradle`), 🦀 Rust (`cargo`), 🐹 Go (`go test`):** Supported via pluggable language adapter strategies (`src/languages/`).
+
+### 5. Multi-Model Benchmark Evaluator & Live Dashboard
+- **Frontier AI Benchmark Harness (`run_benchmark.py`):** Automatically evaluates models (Claude 3.5 Sonnet, GPT-4o, Gemini 2.0 Flash) on generated task packages to report Pass@1 metrics and generate markdown/JSON leaderboards.
+- **Interactive Web Dashboard (`app.py`):** Streamlit interface for live factory runs, task package inspection, validation evidence audit logs, and benchmark leaderboard viewing.
+
 ---
 
 ## 📦 Task Package Structure
@@ -87,7 +98,7 @@ tasks/task_1795146198_001_new_feature/
 ├── solution/
 │   └── solution.diff          # Ground-truth reference implementation patch
 └── tests/
-    └── test_feature_patch.py  # Hidden pytest evaluation suite
+    └── test_feature_patch.py  # Hidden pytest / vitest / ctest evaluation suite
 ```
 
 ---
@@ -96,7 +107,7 @@ tasks/task_1795146198_001_new_feature/
 
 ### 1. Clone & Set Up Virtual Environment
 ```bash
-git clone <YOUR_REPO_URL>
+git clone https://github.com/Yashwanth-N17/innodata-code-task-factory.git
 cd innodata-code-task-factory
 
 python -m venv venv
@@ -111,16 +122,31 @@ pip install -r requirements.txt
 ### 2. Configure Environment
 ```bash
 cp .env.example .env
-# Set your LLM_PROVIDER ('gemini', 'openai', or 'mock') and API Key in .env
+# Set your LLM_PROVIDER ('gemini', 'openai', 'anthropic', or 'mock') and API Key in .env
 ```
 
 ### 3. Run the Factory
 ```bash
-# Offline demo run (zero API credits required):
-python run_factory.py --repo path/to/your/repo --mock --count 2
+# Offline demo run on any local or remote repository (zero API credits required):
+python run_factory.py --repo /path/to/repo --mock --count 1
 
-# Production run using live Gemini or OpenAI APIs:
-python run_factory.py --repo path/to/your/repo --count 5
+# Production run using live Gemini, Claude, or OpenAI:
+python run_factory.py --repo https://github.com/pallets/click --count 3
+
+# Real-world polyglot repository verification:
+python run_factory.py --repo https://github.com/colinhacks/zod --mock --count 1
+python run_factory.py --repo https://github.com/open-source-parsers/jsoncpp --mock --count 1
+```
+
+### 4. Run the Benchmark Evaluator
+```bash
+# Benchmark AI models against generated tasks:
+python run_benchmark.py --repo /path/to/repo --tasks-dir tasks/ --models gemini-2.0-flash,gpt-4o,claude-3-5-sonnet --mock
+```
+
+### 5. Launch the Visual Dashboard
+```bash
+streamlit run app.py
 ```
 
 ---
