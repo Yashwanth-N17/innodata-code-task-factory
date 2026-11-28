@@ -522,6 +522,28 @@ class TypeScriptAdapter(BaseLanguageAdapter):
                 continue
             self._create_directory_link(target, alias)
 
+        self._ensure_test_runner_available(work_dir, manifest)
+
+    def _ensure_test_runner_available(self, work_dir: str, manifest: Dict[str, Any]) -> None:
+        """Raise SandboxPreparationError when a configured test runner cannot run.
+
+        A project that configures Vitest or Jest must have its dependencies installed
+        in the sandbox; silently proceeding would produce misleading baseline/verification
+        errors instead of an actionable setup failure.
+        """
+        runner = manifest.get("test_runner")
+        if runner not in ("vitest", "jest"):
+            return
+        bin_path = self._find_local_bin(work_dir, runner)
+        if bin_path:
+            return
+        package_manager = manifest.get("package_manager") or "unknown"
+        raise SandboxPreparationError(
+            f"Test runner '{runner}' is configured but its entry point was not found "
+            f"in sandbox node_modules. Install dependencies first "
+            f"(package_manager={package_manager})."
+        )
+
     @staticmethod
     def _package_runner_entrypoint(work_dir: str, name: str) -> Optional[str]:
         package_dir = os.path.join(work_dir, "node_modules", name)
@@ -556,15 +578,12 @@ class TypeScriptAdapter(BaseLanguageAdapter):
             bin_path = os.path.join(work_dir, "node_modules", ".bin", name + ".exe")
             if os.path.isfile(bin_path):
                 return bin_path
-            path_entry = shutil.which(name)
-            if path_entry and os.path.splitext(path_entry)[1].lower() == ".exe":
-                return path_entry
             return None
 
         bin_path = os.path.join(work_dir, "node_modules", ".bin", name)
         if os.path.isfile(bin_path):
             return bin_path
-        return shutil.which(name)
+        return None
 
     @staticmethod
     def _runner_command(runner: str, args: List[str]) -> List[str]:
@@ -594,20 +613,112 @@ class TypeScriptAdapter(BaseLanguageAdapter):
         configured_runner = self.inspect_manifest(work_dir).get("test_runner")
         vitest_bin = self._find_local_bin(work_dir, "vitest")
         jest_bin = self._find_local_bin(work_dir, "jest")
+        has_node_modules = os.path.isdir(os.path.join(work_dir, "node_modules"))
 
         if configured_runner == "vitest":
-            if vitest_bin and os.path.isdir(os.path.join(work_dir, "node_modules")):
+            if vitest_bin and has_node_modules:
                 return self._run_vitest(work_dir, vitest_bin, target_test, timeout)
-            return -1, "Vitest is configured but no local runnable Vitest entry point is available.", {}
+            return -1, self._runner_missing_diagnostic("vitest", configured_runner), {}
         if configured_runner == "jest":
-            if jest_bin and os.path.isdir(os.path.join(work_dir, "node_modules")):
+            if jest_bin and has_node_modules:
                 return self._run_jest(work_dir, jest_bin, target_test, timeout)
-            return -1, "Jest is configured but no local runnable Jest entry point is available.", {}
-        if vitest_bin and os.path.isdir(os.path.join(work_dir, "node_modules")):
+            return -1, self._runner_missing_diagnostic("jest", configured_runner), {}
+        if vitest_bin and has_node_modules:
             return self._run_vitest(work_dir, vitest_bin, target_test, timeout)
-        if jest_bin and os.path.isdir(os.path.join(work_dir, "node_modules")):
+        if jest_bin and has_node_modules:
             return self._run_jest(work_dir, jest_bin, target_test, timeout)
         return self._run_node_test(work_dir, target_test, timeout)
+
+    @staticmethod
+    def _runner_missing_diagnostic(runner: str, configured_runner: Optional[str]) -> str:
+        return (
+            f"Test runner '{runner}' is configured but no local runnable {runner} entry point "
+            f"is available in sandbox node_modules. Install dependencies first "
+            f"(declared package manager may differ from npm)."
+        )
+
+    def _workspace_package_for_file(
+        self, work_dir: str, target_file: str
+    ) -> Optional[str]:
+        """Return the workspace package path that contains ``target_file``.
+
+        ``target_file`` may be absolute or relative to ``work_dir``. Returns the
+        workspace package's relative path (e.g. ``packages/zod``) when the target
+        file lives inside that package, otherwise ``None``.
+        """
+        manifest = self.inspect_manifest(work_dir)
+        workspaces = manifest.get("workspace_packages") or []
+        if not workspaces:
+            return None
+
+        # Normalize the target file to a path relative to work_dir.
+        target_abs = (
+            target_file if os.path.isabs(target_file)
+            else os.path.join(work_dir, target_file)
+        )
+        target_abs = os.path.normpath(target_abs)
+        target_rel = os.path.relpath(target_abs, os.path.abspath(work_dir)).replace("\\", "/")
+
+        # Deterministic: prefer the workspace package whose path is a prefix of the
+        # target file. Sort candidates so the choice is stable across runs.
+        candidates = []
+        for pkg in workspaces:
+            pkg_path = (pkg or {}).get("path", "")
+            if not pkg_path:
+                continue
+            pkg_norm = pkg_path.replace("\\", "/")
+            if target_rel == pkg_norm or target_rel.startswith(pkg_norm + "/"):
+                candidates.append(pkg_norm)
+        if candidates:
+            candidates.sort()
+            return candidates[0]
+        return None
+
+    def generated_test_relpath(
+        self, work_dir: Optional[str] = None, target_file: Optional[str] = None
+    ) -> str:
+        """Return the relative path for the generated acceptance test.
+
+        Defaults to ``tests/test_feature_patch.test.ts``. For Vitest monorepos that
+        scope discovery through ``test.projects`` (each workspace package is a
+        separate project), the generated test is placed inside the workspace package
+        that contains the target source file when ``target_file`` is provided;
+        otherwise it falls back to the deterministically-sorted first workspace
+        package. This avoids assuming ``workspaces[0]`` (glob insertion order) is
+        the correct package.
+        """
+        if work_dir:
+            manifest = self.inspect_manifest(work_dir)
+            workspaces = manifest.get("workspace_packages") or []
+            runner = manifest.get("test_runner")
+            if workspaces and runner == "vitest":
+                pkg_path: Optional[str] = None
+                if target_file:
+                    pkg_path = self._workspace_package_for_file(work_dir, target_file)
+                if not pkg_path:
+                    # Documented deterministic fallback: sorted first workspace package.
+                    paths = sorted(
+                        (p or {}).get("path", "") for p in workspaces if (p or {}).get("path")
+                    )
+                    pkg_path = paths[0] if paths else ""
+                if pkg_path:
+                    return os.path.normpath(
+                        os.path.join(
+                            pkg_path.replace("\\", "/"), "tests", "test_feature_patch.test.ts"
+                        )
+                    )
+        return self.test_file_relpath
+
+    def write_test_file(
+        self, work_dir: str, test_code: str, target_file: Optional[str] = None
+    ) -> str:
+        """Write synthesized test code into the sandbox working directory."""
+        rel = self.generated_test_relpath(work_dir, target_file=target_file)
+        path = os.path.join(work_dir, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(test_code)
+        return path
 
     def _run_vitest(
         self,
@@ -693,10 +804,12 @@ class TypeScriptAdapter(BaseLanguageAdapter):
             )
             if (
                 target_test is None
-                and os.path.isfile(os.path.join(work_dir, self.test_file_relpath))
+                and os.path.isfile(os.path.join(work_dir, self.generated_test_relpath(work_dir)))
                 and not any(self.is_new_test(k) for k in parsed)
             ):
-                c2, o2, p2 = self._run_vitest(work_dir, vitest_bin, self.test_file_relpath, timeout)
+                c2, o2, p2 = self._run_vitest(
+                    work_dir, vitest_bin, self.generated_test_relpath(work_dir), timeout
+                )
                 parsed_count = (
                     parsed.discovered_count
                     if parsed.discovered_count is not None
@@ -1053,9 +1166,15 @@ class TypeScriptAdapter(BaseLanguageAdapter):
             ),
         }
 
-    def get_environment_metadata(self, repo_path: str, manifest: Dict[str, Any]) -> Dict[str, Any]:
+    def get_environment_metadata(
+        self,
+        repo_path: str,
+        manifest: Dict[str, Any],
+        test_relpath: Optional[str] = None,
+    ) -> Dict[str, Any]:
         runner = manifest.get("test_runner", "vitest")
-        cmd = "npx vitest run tests/test_feature_patch.test.ts" if runner == "vitest" else "node --test tests/test_feature_patch.test.ts"
+        test_rel = test_relpath or self.generated_test_relpath(repo_path).replace("\\", "/")
+        cmd = f"npx vitest run {test_rel}" if runner == "vitest" else f"node --test {test_rel}"
         return {
             "node_version": manifest.get("node_version", ">=18"),
             "package_manager": manifest.get("package_manager", "npm"),

@@ -26,6 +26,7 @@ from src.exporter import check_test_mutation_rigor, export_swebench_jsonl
 from src.languages import LanguageRegistry
 from src.packager import TaskPackager
 from src.repo_loader import bootstrap_environment, resolve_repository
+from src.js_package_manager import JSBootstrapError
 from src.spec_generator import SpecGenerator
 from src.test_agent import TestAgent
 from src.variation_controller import VariationController
@@ -96,7 +97,10 @@ def main():
 
     analyzer = CodebaseAnalyzer(repo_path, language=lang_override)
     if args.setup_env:
-        print(f"[Bootstrap] {bootstrap_environment(repo_path, analyzer.language)}")
+        try:
+            print(f"[Bootstrap] {bootstrap_environment(repo_path, analyzer.language)}")
+        except JSBootstrapError as e:
+            print(f"[Bootstrap] Setup failed: {e}")
 
     scan_data = analyzer.scan()
 
@@ -115,6 +119,11 @@ def main():
     print(f" Source Files Found : {len(scan_data['files'])}")
     print(f" Test Files Found   : {len(scan_data['existing_tests'])}")
     print(f" Target Focus Files : {', '.join(scan_data.get('target_files') or []) or 'None'}")
+
+    # Determined once per batch: the generated acceptance test lands in the
+    # workspace package containing the selected target source file.
+    target_files = scan_data.get("target_files") or []
+    target_file = target_files[0] if target_files else None
 
     spec_gen = SpecGenerator()
     coder = CoderAgent(language_adapter=analyzer.adapter)
@@ -253,7 +262,9 @@ def main():
 
                 print(f"     -> Re-verifying repaired artifacts (Attempt {repair_attempt})...")
                 task_stage = "verification"
-                verification = verifier.verify(solution_diff=solution_diff, test_code=test_code)
+            verification = verifier.verify(
+                solution_diff=solution_diff, test_code=test_code, target_file=target_file
+            )
                 task_status = "VERIFIED" if verification.is_valid else "FAILED_VERIFICATION"
                 baseline_outcome = getattr(verification, "step1_outcome", None)
                 baseline_allows_verification = (

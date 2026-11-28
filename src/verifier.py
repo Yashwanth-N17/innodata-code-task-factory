@@ -149,10 +149,11 @@ class VerificationResult:
         self.step1_evidence: Optional[TestRunEvidence] = None
         self.step2_evidence: Optional[TestRunEvidence] = None
         self.step3_evidence: Optional[TestRunEvidence] = None
-        self.step2_failed_test_ids: List[str] = []
-        self.warnings: List[str] = []
-        self.config: Dict[str, object] = {}
-        self.logs: Dict[str, str] = {}
+    self.step2_failed_test_ids: List[str] = []
+    self.warnings: List[str] = []
+    self.config: Dict[str, object] = {}
+    self.logs: Dict[str, str] = {}
+    self.generated_test_relpath: Optional[str] = None
 
     @property
     def step1_outcome(self) -> Optional[str]:
@@ -347,8 +348,10 @@ class SandboxVerifier:
             diagnostics=f"Sandbox preparation failed: {exc}",
         )
 
-    def _write_test(self, work_dir: str, test_code: str) -> str:
-        return self.adapter.write_test_file(work_dir, test_code)
+    def _write_test(
+        self, work_dir: str, test_code: str, target_file: Optional[str] = None
+    ) -> str:
+        return self.adapter.write_test_file(work_dir, test_code, target_file=target_file)
 
     @staticmethod
     def _is_real_failure(code: int, out: str) -> bool:
@@ -356,9 +359,17 @@ class SandboxVerifier:
 
     # ---- main entry --------------------------------------------------------
 
-    def verify(self, solution_diff: str, test_code: str) -> VerificationResult:
+    def verify(
+        self,
+        solution_diff: str,
+        test_code: str,
+        target_file: Optional[str] = None,
+    ) -> VerificationResult:
         """Run the 3-step matrix, each step in its own clean copy."""
         result = VerificationResult(adapter=self.adapter)
+        result.generated_test_relpath = self.adapter.generated_test_relpath(
+            self.repo_path, target_file=target_file
+        ).replace("\\", "/")
         result.config = {
             "timeout_seconds": self.timeout,
             "strict_patch": self.strict_patch,
@@ -386,7 +397,7 @@ class SandboxVerifier:
                 result.step2_evidence = self._preparation_error_evidence(exc)
                 result.logs["step2_negative_check"] = result.step2_evidence.diagnostics
                 return result
-            test_path = self.adapter.write_test_file(neg_dir, test_code)
+            test_path = self.adapter.write_test_file(neg_dir, test_code, target_file=target_file)
             negative_evidence = self._execute_tests_detailed(neg_dir, target_test=test_path)
             result.step2_evidence = negative_evidence
             result.logs["step2_negative_check"] = negative_evidence.diagnostics
@@ -429,7 +440,7 @@ class SandboxVerifier:
             result.patch_applied_cleanly = (patch_code == 0)
 
             if result.patch_applied_cleanly:
-                self.adapter.write_test_file(pos_dir, test_code)
+                self.adapter.write_test_file(pos_dir, test_code, target_file=target_file)
                 after_evidence = self._execute_tests_detailed(pos_dir)
                 result.step3_evidence = after_evidence
                 result.logs["step3_positive_check"] = after_evidence.diagnostics

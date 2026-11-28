@@ -1057,7 +1057,7 @@ class TypeScriptSandboxWindowsTests(unittest.TestCase):
 
         node_test.assert_not_called()
         self.assertEqual(code, -1)
-        self.assertIn("Vitest is configured", diagnostics)
+        self.assertIn("no local runnable vitest entry point", diagnostics)
         self.assertEqual(results, {})
 
     def test_posix_runner_command_keeps_existing_launcher_behavior(self):
