@@ -336,7 +336,7 @@ class BenchmarkEvaluator:
 
         # Base audit structure (preserves original starter keys for compatibility)
         audit: Dict[str, Any] = {
-            "model_tested": model_name,
+            "model_tested":model_name, #the name of the model to be tested, gpt sol, fable, or even hydrogen if APi key is there
             "task_id": task_id,
             "archetype": archetype,
             "passed": False,
