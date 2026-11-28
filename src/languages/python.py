@@ -366,9 +366,8 @@ class PythonAdapter(BaseLanguageAdapter):
         if target_test:
             targets = [target_test]
         else:
-            targets = [d for d in ("tests", "test") if os.path.isdir(os.path.join(work_dir, d))]
-            if not targets:
-                return 0, "No existing test suite found in target repository; baseline clean.", {}
+            # With no positional path pytest applies configured testpaths and root-level patterns.
+            targets = []
 
         fd, xml_path = tempfile.mkstemp(suffix=".xml", prefix="junit_")
         os.close(fd)
@@ -422,6 +421,19 @@ class PythonAdapter(BaseLanguageAdapter):
         if "No module named pytest" in out:
             return False
         return True
+
+    def canonical_test_id(self, test_id: str) -> str:
+        """Preserve whitespace in pytest parameter IDs while normalizing path separators."""
+        return (test_id or "").replace("\\", "/").strip()
+
+    def has_no_tests_evidence(self, exit_code: int, diagnostics: str, results: Dict[str, str]) -> bool:
+        lower = diagnostics.lower()
+        return (
+            exit_code == 5
+            and "no tests ran" in lower
+            and "error collecting" not in lower
+            and not results
+        )
 
     def is_new_test(self, test_id: str) -> bool:
         module = test_id.split("::")[0]

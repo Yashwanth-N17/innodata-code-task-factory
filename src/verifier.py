@@ -17,7 +17,15 @@ import sys
 import tempfile
 from typing import Dict, List, Optional, Tuple
 
-from .languages import BaseLanguageAdapter, LanguageRegistry, PythonAdapter, parse_junit_xml
+from .languages import (
+    BaseLanguageAdapter,
+    LanguageRegistry,
+    PythonAdapter,
+    TestRunEvidence,
+    TestRunOutcome,
+    parse_junit_xml,
+)
+from .languages.base import SandboxPreparationError
 from .languages.python import detect_repo_python
 from .sandbox_docker import DockerSandboxRunner
 
@@ -129,7 +137,8 @@ def _is_new_test(test_id: str) -> bool:
 # ----------------------------------------------------------------------------
 
 class VerificationResult:
-    def __init__(self):
+    def __init__(self, adapter: Optional[BaseLanguageAdapter] = None):
+        self._adapter = adapter
         self.step1_baseline_pass: bool = False
         self.step2_negative_fail: bool = False
         self.step3_positive_pass: bool = False
@@ -137,17 +146,73 @@ class VerificationResult:
         self.patch_tier: str = ""
         self.fail_to_pass: List[str] = []
         self.pass_to_pass: List[str] = []
-        self.warnings: List[str] = []
-        self.config: Dict[str, object] = {}
-        self.logs: Dict[str, str] = {}
+        self.step1_evidence: Optional[TestRunEvidence] = None
+        self.step2_evidence: Optional[TestRunEvidence] = None
+        self.step3_evidence: Optional[TestRunEvidence] = None
+    self.step2_failed_test_ids: List[str] = []
+    self.warnings: List[str] = []
+    self.config: Dict[str, object] = {}
+    self.logs: Dict[str, str] = {}
+    self.generated_test_relpath: Optional[str] = None
+
+    @property
+    def step1_outcome(self) -> Optional[str]:
+        return self.step1_evidence.outcome.value if self.step1_evidence else None
 
     @property
     def is_valid(self) -> bool:
-        """A task is only valid if ALL THREE steps pass the matrix."""
+        """A task requires a usable baseline and a same-test fail-to-pass transition."""
+        if not (
+            self.step1_evidence is not None
+            and self.step2_evidence is not None
+            and self.step3_evidence is not None
+            and self._adapter is not None
+        ):
+            return False
+
+        def canonical_statuses(evidence: TestRunEvidence) -> Optional[Dict[str, str]]:
+            statuses: Dict[str, str] = {}
+            for test_id, status in evidence.test_results.items():
+                if not isinstance(test_id, str) or not test_id.strip():
+                    return None
+                canonical_id = self._adapter.canonical_test_id(test_id)
+                if not canonical_id or canonical_id in statuses:
+                    return None
+                statuses[canonical_id] = status
+            return statuses
+
+        step2_statuses = canonical_statuses(self.step2_evidence)
+        step3_statuses = canonical_statuses(self.step3_evidence)
+        if step2_statuses is None or step3_statuses is None:
+            return False
+
+        red_ids = []
+        for test_id in self.step2_failed_test_ids:
+            if not isinstance(test_id, str) or not test_id.strip():
+                return False
+            canonical_id = self._adapter.canonical_test_id(test_id)
+            if not canonical_id:
+                return False
+            red_ids.append(canonical_id)
+        if not red_ids or len(set(red_ids)) != len(red_ids):
+            return False
+
+        generated_failures = {
+            test_id
+            for test_id, status in step2_statuses.items()
+            if status == "failed" and self._adapter.is_new_test(test_id)
+        }
+
         return (
-            self.step1_baseline_pass
-            and self.step2_negative_fail
-            and self.step3_positive_pass
+            self.step1_evidence.outcome in (
+                TestRunOutcome.PASS,
+                TestRunOutcome.NO_TESTS_FOUND,
+            )
+            and self.step2_evidence.outcome == TestRunOutcome.FAIL
+            and set(red_ids) == generated_failures
+            and all(step2_statuses.get(test_id) == "failed" for test_id in red_ids)
+            and self.step3_evidence.outcome == TestRunOutcome.PASS
+            and all(step3_statuses.get(test_id) == "passed" for test_id in red_ids)
         )
 
     def to_dict(self, max_log_chars: int = 2000) -> Dict[str, object]:
@@ -156,6 +221,13 @@ class VerificationResult:
             if len(text) <= max_log_chars:
                 return text
             return "...[truncated]\n" + text[-max_log_chars:]
+
+        def evidence_dict(evidence: Optional[TestRunEvidence]):
+            if evidence is None:
+                return None
+            data = evidence.to_dict()
+            data["diagnostics"] = trim(evidence.diagnostics)
+            return data
 
         return {
             "is_valid": self.is_valid,
@@ -167,6 +239,12 @@ class VerificationResult:
             "patch": {"applied_cleanly": self.patch_applied_cleanly, "tier": self.patch_tier},
             "fail_to_pass": list(self.fail_to_pass),
             "pass_to_pass": list(self.pass_to_pass),
+            "step_evidence": {
+                "step1_baseline": evidence_dict(self.step1_evidence),
+                "step2_negative_check": evidence_dict(self.step2_evidence),
+                "step3_positive_check": evidence_dict(self.step3_evidence),
+                "step2_failed_test_ids": list(self.step2_failed_test_ids),
+            },
             "warnings": list(self.warnings),
             "config": dict(self.config),
             "logs": {name: trim(text) for name, text in self.logs.items()},
@@ -216,17 +294,64 @@ class SandboxVerifier:
             work_dir, target_test=target_test, timeout=self.timeout, python_executable=self.python_executable
         )
 
+    def _execute_tests_detailed(
+        self,
+        work_dir: str,
+        target_test: Optional[str] = None,
+    ) -> TestRunEvidence:
+        if self.sandbox == "docker":
+            # Keep Docker execution unchanged; classify its existing tuple response.
+            code, diagnostics, results = self._execute_tests(work_dir, target_test=target_test)
+            return self.adapter.evidence_from_test_run(code, diagnostics, results)
+        try:
+            return self.adapter.run_tests_detailed(
+                work_dir,
+                target_test=target_test,
+                timeout=self.timeout,
+                python_executable=self.python_executable,
+            )
+        except Exception as exc:
+            return TestRunEvidence(
+                outcome=TestRunOutcome.ERROR,
+                discovered_count=0,
+                executed_count=0,
+                passed_count=0,
+                failed_count=0,
+                skipped_count=0,
+                error_count=0,
+                exit_code=-1,
+                diagnostics=f"Test adapter execution raised {type(exc).__name__}: {exc}",
+            )
+
     # ---- helpers -----------------------------------------------------------
 
     def _fresh_copy(self, temp_dir: str, name: str) -> str:
         """Isolated copy of the repo prepared for the target language's sandbox."""
         dst = os.path.join(temp_dir, name)
         shutil.copytree(self.repo_path, dst, ignore=_COPY_IGNORE)
+        if os.name == "nt" and self.adapter.language_id == "typescript":
+            dst = os.path.realpath(dst)
         self.adapter.prepare_sandbox(self.repo_path, dst)
         return dst
 
-    def _write_test(self, work_dir: str, test_code: str) -> str:
-        return self.adapter.write_test_file(work_dir, test_code)
+    @staticmethod
+    def _preparation_error_evidence(exc: SandboxPreparationError) -> TestRunEvidence:
+        return TestRunEvidence(
+            outcome=TestRunOutcome.ERROR,
+            discovered_count=0,
+            executed_count=0,
+            passed_count=0,
+            failed_count=0,
+            skipped_count=0,
+            error_count=0,
+            exit_code=-1,
+            diagnostics=f"Sandbox preparation failed: {exc}",
+        )
+
+    def _write_test(
+        self, work_dir: str, test_code: str, target_file: Optional[str] = None
+    ) -> str:
+        return self.adapter.write_test_file(work_dir, test_code, target_file=target_file)
 
     @staticmethod
     def _is_real_failure(code: int, out: str) -> bool:
@@ -234,9 +359,17 @@ class SandboxVerifier:
 
     # ---- main entry --------------------------------------------------------
 
-    def verify(self, solution_diff: str, test_code: str) -> VerificationResult:
+    def verify(
+        self,
+        solution_diff: str,
+        test_code: str,
+        target_file: Optional[str] = None,
+    ) -> VerificationResult:
         """Run the 3-step matrix, each step in its own clean copy."""
-        result = VerificationResult()
+        result = VerificationResult(adapter=self.adapter)
+        result.generated_test_relpath = self.adapter.generated_test_relpath(
+            self.repo_path, target_file=target_file
+        ).replace("\\", "/")
         result.config = {
             "timeout_seconds": self.timeout,
             "strict_patch": self.strict_patch,
@@ -246,20 +379,45 @@ class SandboxVerifier:
 
         with tempfile.TemporaryDirectory() as temp_dir:
             # Step 1: Baseline (original repo + existing tests -> PASS)
-            base_dir = self._fresh_copy(temp_dir, "step1_baseline")
-            code, out, base_results = self._execute_tests(base_dir)
-            result.logs["step1_baseline"] = out
-            result.step1_baseline_pass = (code == 0)
+            try:
+                base_dir = self._fresh_copy(temp_dir, "step1_baseline")
+            except SandboxPreparationError as exc:
+                result.step1_evidence = self._preparation_error_evidence(exc)
+                result.logs["step1_baseline"] = result.step1_evidence.diagnostics
+                return result
+            base_evidence = self._execute_tests_detailed(base_dir)
+            result.step1_evidence = base_evidence
+            result.logs["step1_baseline"] = base_evidence.diagnostics
+            result.step1_baseline_pass = base_evidence.outcome == TestRunOutcome.PASS
 
             # Step 2: Negative check (original repo + new tests -> real FAIL)
-            neg_dir = self._fresh_copy(temp_dir, "step2_negative")
-            test_path = self.adapter.write_test_file(neg_dir, test_code)
-            code, out, _ = self._execute_tests(neg_dir, target_test=test_path)
-            result.logs["step2_negative_check"] = out
-            result.step2_negative_fail = self.adapter.is_real_failure(code, out)
+            try:
+                neg_dir = self._fresh_copy(temp_dir, "step2_negative")
+            except SandboxPreparationError as exc:
+                result.step2_evidence = self._preparation_error_evidence(exc)
+                result.logs["step2_negative_check"] = result.step2_evidence.diagnostics
+                return result
+            test_path = self.adapter.write_test_file(neg_dir, test_code, target_file=target_file)
+            negative_evidence = self._execute_tests_detailed(neg_dir, target_test=test_path)
+            result.step2_evidence = negative_evidence
+            result.logs["step2_negative_check"] = negative_evidence.diagnostics
+            result.step2_failed_test_ids = sorted(
+                test_id
+                for test_id, status in negative_evidence.test_results.items()
+                if status == "failed" and self.adapter.is_new_test(test_id)
+            )
+            result.step2_negative_fail = (
+                negative_evidence.outcome == TestRunOutcome.FAIL
+                and bool(result.step2_failed_test_ids)
+            )
 
             # Step 3: Positive check (repo + solution.diff + all tests -> PASS)
-            pos_dir = self._fresh_copy(temp_dir, "step3_positive")
+            try:
+                pos_dir = self._fresh_copy(temp_dir, "step3_positive")
+            except SandboxPreparationError as exc:
+                result.step3_evidence = self._preparation_error_evidence(exc)
+                result.logs["step3_positive_check"] = result.step3_evidence.diagnostics
+                return result
             patch_file_path = os.path.join(temp_dir, "solution.patch")
             with open(patch_file_path, "w", encoding="utf-8", newline="\n") as f:
                 f.write(solution_diff)
@@ -282,19 +440,25 @@ class SandboxVerifier:
             result.patch_applied_cleanly = (patch_code == 0)
 
             if result.patch_applied_cleanly:
-                self.adapter.write_test_file(pos_dir, test_code)
-                all_code, all_out, after = self._execute_tests(pos_dir)
-                result.logs["step3_positive_check"] = all_out
+                self.adapter.write_test_file(pos_dir, test_code, target_file=target_file)
+                after_evidence = self._execute_tests_detailed(pos_dir)
+                result.step3_evidence = after_evidence
+                result.logs["step3_positive_check"] = after_evidence.diagnostics
 
+                passed_after = set(after_evidence.passed_test_ids)
                 result.fail_to_pass = sorted(
-                    t for t, st in after.items() if self.adapter.is_new_test(t) and st == "passed"
+                    set(result.step2_failed_test_ids).intersection(passed_after)
                 )
                 result.pass_to_pass = sorted(
-                    t for t, st in after.items()
-                    if not self.adapter.is_new_test(t) and st == "passed"
-                    and base_results.get(t) == "passed"
+                    t for t in passed_after
+                    if not self.adapter.is_new_test(t)
+                    and base_evidence.test_results.get(t) == "passed"
                 )
-                result.step3_positive_pass = (all_code == 0 and len(result.fail_to_pass) > 0)
+                result.step3_positive_pass = (
+                    after_evidence.outcome == TestRunOutcome.PASS
+                    and bool(result.step2_failed_test_ids)
+                    and set(result.step2_failed_test_ids).issubset(passed_after)
+                )
             else:
                 result.logs["step3_positive_check"] = f"Patch failed to apply: {patch_out}"
                 result.step3_positive_pass = False

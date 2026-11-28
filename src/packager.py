@@ -1,17 +1,24 @@
+
 """
-Feature 6: Standardized Polyglot Task Packager.
+Feature 6: Standardized Task Packager.
+
 Standardizes and saves verified tasks into SWE-bench compliant task packages:
 - task.toml (language-calibrated runtime & test command)
 - instruction.md
 - solution/solution.diff
-- tests/test_feature_patch.<ext>
-- validation_report.json & metadata.json
+- Language-native generated acceptance tests
+- validation_report.json
+
+Input: Task artifacts, repo metadata, and verification audit results.
+Output: Standardized directory under tasks/<task_id>/.
 """
 
 import json
 import os
+import shutil
+import tempfile
 import time
-from typing import Any, Dict, Optional
+from typing import Dict, Any, Optional
 
 from .languages import BaseLanguageAdapter, PythonAdapter
 from .verifier import VerificationResult
@@ -31,87 +38,202 @@ class TaskPackager:
         solution_diff: str,
         test_code: str,
         verification: VerificationResult,
+        overwrite: bool = False,
         language_adapter: Optional[BaseLanguageAdapter] = None,
         manifest: Optional[Dict[str, Any]] = None,
         repo_meta: Optional[Dict[str, str]] = None,
         rigor_check: Optional[Dict[str, Any]] = None,
+        repo_path: str = "",
+        generated_test_relpath: Optional[str] = None,
     ) -> str:
-        """Create the standardized polyglot SWE-bench task package directory."""
-        adapter = language_adapter or PythonAdapter()
+        """Create a standardized SWE-bench task package directory.
+
+        All artifacts are written to a temporary staging directory first.
+        The completed package is moved to its final location only after
+        all files have been successfully created.
+
+        Args:
+            task_id: Unique task identifier used as directory name.
+            repo_name: Name of the target repository.
+            category: Task category.
+            instruction_md: Feature specification markdown.
+            solution_diff: Unified git diff patch.
+            test_code: Language-native acceptance test source code.
+            verification: VerificationResult from SandboxVerifier.
+            overwrite: Whether to replace an existing task directory.
+            language_adapter: Language adapter for the target language.
+            manifest: Repository manifest metadata.
+            repo_meta: Repository metadata (url, commit hash, etc.).
+            rigor_check: Optional rigor audit results.
+            repo_path: Path to the source repository.
+            generated_test_relpath: The generated test relative path, as
+                determined during verification. If not provided, falls back
+                to the adapter's default computed path.
+
+        Returns:
+            Absolute path to the created task directory.
+
+        Raises:
+            ValueError: If required inputs are missing or invalid.
+            FileExistsError: If the task directory already exists
+                and overwrite is False.
+            TypeError: If verification is not a VerificationResult.
+        """
+
+        # ---- Input validation ----
+
+        if not task_id or not isinstance(task_id, str):
+            raise ValueError("task_id must be a non-empty string.")
+
+        if not repo_name or not isinstance(repo_name, str):
+            raise ValueError("repo_name must be a non-empty string.")
+
+        if not category or not isinstance(category, str):
+            raise ValueError("category must be a non-empty string.")
+
+        if not instruction_md or not isinstance(instruction_md, str):
+            raise ValueError("instruction_md must be a non-empty string.")
+
+        if not solution_diff or not isinstance(solution_diff, str):
+            raise ValueError("solution_diff must be a non-empty string.")
+
+        if not test_code or not isinstance(test_code, str):
+            raise ValueError("test_code must be a non-empty string.")
+
+        if not isinstance(verification, VerificationResult):
+            raise TypeError(
+                "verification must be a VerificationResult instance "
+                f"from src.verifier, got {type(verification).__name__}."
+            )
+        verification_valid = verification.is_valid
+
+        # Prevent task_id from escaping the output directory.
+        if os.path.basename(task_id) != task_id:
+            raise ValueError("task_id must be a valid directory name.")
+
+        language_adapter = language_adapter or PythonAdapter()
         manifest = manifest or {}
         repo_meta = repo_meta or {}
+        if generated_test_relpath:
+            test_file_relpath = generated_test_relpath.replace("\\", "/")
+        else:
+            test_file_relpath = language_adapter.generated_test_relpath(repo_path).replace("\\", "/")
+        environment = language_adapter.get_environment_metadata(repo_path, manifest, test_relpath=test_file_relpath)
+        task_dir = os.path.join(self.output_root, task_id)
 
-        safe_id = os.path.basename(str(task_id).replace("\\", "/").rstrip("/"))
-        if not safe_id or safe_id in (".", ".."):
-            raise ValueError(f"Invalid task_id: {task_id!r}")
-        task_dir = os.path.join(self.output_root, safe_id)
-        if os.path.commonpath([os.path.realpath(task_dir), os.path.realpath(self.output_root)]) != os.path.realpath(self.output_root):
-            raise ValueError(f"task_id escapes output_root: {task_id!r}")
-        solution_dir = os.path.join(task_dir, "solution")
-        tests_dir = os.path.join(task_dir, "tests")
+        # ---- Existing directory handling ----
 
-        os.makedirs(solution_dir, exist_ok=True)
-        os.makedirs(tests_dir, exist_ok=True)
+        if os.path.exists(task_dir) and not overwrite:
+            raise FileExistsError(
+                f"Task directory already exists: {task_dir}. "
+                f"Use overwrite=True to replace it."
+            )
 
-        # 1. Write instruction.md
-        with open(os.path.join(task_dir, "instruction.md"), "w", encoding="utf-8") as f:
-            f.write(instruction_md)
+        # ---- Stage package in temporary directory ----
 
-        # 2. Write solution.diff (in solution/ and at task root)
-        with open(os.path.join(solution_dir, "solution.diff"), "w", encoding="utf-8") as f:
-            f.write(solution_diff)
-        with open(os.path.join(task_dir, "solution.diff"), "w", encoding="utf-8") as f:
-            f.write(solution_diff)
-
-        # 3. Write language-native test file and root test_patch.<ext>
-        test_rel_path = os.path.join(task_dir, adapter.test_file_relpath)
-        os.makedirs(os.path.dirname(test_rel_path), exist_ok=True)
-        with open(test_rel_path, "w", encoding="utf-8") as f:
-            f.write(test_code)
-        with open(os.path.join(task_dir, adapter.root_test_filename), "w", encoding="utf-8") as f:
-            f.write(test_code)
-
-        # 4. Write polyglot task.toml
-        created_at = time.strftime("%Y-%m-%dT%H:%M:%SZ")
-        env_meta = adapter.get_environment_metadata(task_dir, manifest)
-        toml_content = adapter.format_task_toml(
-            task_id=task_id,
-            repo_name=repo_name,
-            category=category,
-            created_at=created_at,
-            env_meta=env_meta,
-            repo_meta=repo_meta,
+        staging_dir = tempfile.mkdtemp(
+            prefix=f"{task_id}_stage_",
+            dir=self.output_root,
         )
-        with open(os.path.join(task_dir, "task.toml"), "w", encoding="utf-8") as f:
-            f.write(toml_content)
 
-        # 5. Write validation_report.json and metadata.json
-        report = {
-            "task_id": task_id,
-            "repo_name": repo_name,
-            "language": adapter.language_id,
-            "repo_url": repo_meta.get("repo_url", ""),
-            "base_commit": repo_meta.get("commit_hash", ""),
-            "category": category,
-            "created_at": created_at,
-            "status": "VERIFIED" if verification.is_valid else "FAILED_VERIFICATION",
-            "checks": {
-                "step1_baseline_pass": verification.step1_baseline_pass,
-                "step2_negative_fail": verification.step2_negative_fail,
-                "step3_positive_pass": verification.step3_positive_pass,
-                "patch_applied_cleanly": verification.patch_applied_cleanly,
-            },
-            "environment": env_meta,
-            "evaluation": {
-                "fail_to_pass": list(verification.fail_to_pass),
-                "pass_to_pass": list(verification.pass_to_pass),
-            },
-            "logs": verification.logs,
-            "rigor_check": rigor_check,
-        }
-        with open(os.path.join(task_dir, "validation_report.json"), "w", encoding="utf-8") as f:
-            json.dump(report, f, indent=2)
-        with open(os.path.join(task_dir, "metadata.json"), "w", encoding="utf-8") as f:
-            json.dump(report, f, indent=2)
+        try:
+            solution_dir = os.path.join(staging_dir, "solution")
+            test_path = os.path.join(staging_dir, *test_file_relpath.split("/"))
+
+            os.makedirs(solution_dir, exist_ok=True)
+            os.makedirs(os.path.dirname(test_path), exist_ok=True)
+
+            # 1. Write instruction.md
+            with open(
+                os.path.join(staging_dir, "instruction.md"),
+                "w",
+                encoding="utf-8",
+            ) as f:
+                f.write(instruction_md)
+
+            # 2. Write solution/solution.diff
+            with open(
+                os.path.join(solution_dir, "solution.diff"),
+                "w",
+                encoding="utf-8",
+            ) as f:
+                f.write(solution_diff)
+
+            # 3. Write the language adapter's test file.
+            with open(
+                test_path,
+                "w",
+                encoding="utf-8",
+            ) as f:
+                f.write(test_code)
+
+            # 4. Write task.toml
+            created_at = time.strftime("%Y-%m-%dT%H:%M:%SZ")
+            toml_content = language_adapter.format_task_toml(
+                task_id=task_id,
+                repo_name=repo_name,
+                category=category,
+                created_at=created_at,
+                env_meta=environment,
+                repo_meta=repo_meta,
+            )
+
+            with open(
+                os.path.join(staging_dir, "task.toml"),
+                "w",
+                encoding="utf-8",
+            ) as f:
+                f.write(toml_content)
+
+            # 5. Write validation_report.json
+            report = {
+                "task_id": task_id,
+                "repo_name": repo_name,
+                "category": category,
+                "repo_url": repo_meta.get("repo_url", ""),
+                "base_commit": repo_meta.get("commit_hash", ""),
+                "language": language_adapter.language_id,
+                "created_at": created_at,
+                "status": (
+                    "VERIFIED"
+                    if verification_valid
+                    else "FAILED_VERIFICATION"
+                ),
+                "checks": {
+                    "step1_baseline_pass": verification.step1_baseline_pass,
+                    "step2_negative_fail": verification.step2_negative_fail,
+                    "step3_positive_pass": verification.step3_positive_pass,
+                    "patch_applied_cleanly": verification.patch_applied_cleanly,
+                },
+                "environment": environment,
+                "evaluation": {
+                    "fail_to_pass": list(verification.fail_to_pass),
+                    "pass_to_pass": list(verification.pass_to_pass),
+                },
+                "logs": verification.logs,
+            }
+            if rigor_check is not None:
+                report["rigor_check"] = rigor_check
+
+            with open(
+                os.path.join(staging_dir, "validation_report.json"),
+                "w",
+                encoding="utf-8",
+            ) as f:
+                json.dump(report, f, indent=2)
+
+            # ---- Replace existing package if overwrite is enabled ----
+
+            if overwrite and os.path.exists(task_dir):
+                shutil.rmtree(task_dir)
+
+            # ---- Move completed package to final destination ----
+
+            shutil.move(staging_dir, task_dir)
+
+        except Exception:
+            # Clean up staging directory if packaging fails.
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            raise
 
         return task_dir

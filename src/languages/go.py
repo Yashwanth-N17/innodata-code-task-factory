@@ -10,7 +10,7 @@ import shutil
 import subprocess
 from typing import Any, Dict, List, Optional, Tuple
 
-from .base import BaseLanguageAdapter, DEFAULT_IGNORED_DIRS
+from .base import BaseLanguageAdapter, DEFAULT_IGNORED_DIRS, TestResultMap
 
 
 _GO_IMPORT_RE = re.compile(r'^\s*"([^"]+)"')
@@ -154,25 +154,59 @@ class GoAdapter(BaseLanguageAdapter):
                 cmd, cwd=work_dir, capture_output=True, text=True,
                 encoding="utf-8", errors="replace", timeout=timeout,
             )
-            results: Dict[str, str] = {}
-            for line in res.stdout.splitlines():
-                try:
-                    ev = json.loads(line)
-                except Exception:
-                    continue
-                tname = ev.get("Test")
-                action = ev.get("Action")
-                pkg = ev.get("Package", "pkg")
-                if tname and action in ("pass", "fail", "skip"):
-                    results[f"{pkg}::{tname}"] = "passed" if action == "pass" else ("skipped" if action == "skip" else "failed")
-            return res.returncode, res.stdout + "\n" + res.stderr, results
+            diagnostics = res.stdout + "\n" + res.stderr
+            return res.returncode, diagnostics, self.parse_test_output(res.stdout)
         except subprocess.TimeoutExpired:
             return -1, f"Go test timed out after {timeout} seconds.", {}
         except Exception as e:
             return -1, f"Go test execution failed: {e}", {}
 
+    @staticmethod
+    def parse_test_output(output: str) -> TestResultMap:
+        results = TestResultMap()
+        parse_errors = 0
+        build_failures = 0
+        for line in output.splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                if line.strip():
+                    parse_errors += 1
+                continue
+            action = event.get("Action")
+            if action == "build-fail":
+                build_failures += 1
+                continue
+            test_name = event.get("Test")
+            if test_name and action in ("pass", "fail", "skip"):
+                package = event.get("Package", "pkg")
+                status = {
+                    "pass": "passed",
+                    "fail": "failed",
+                    "skip": "skipped",
+                }[action]
+                results[f"{package}::{test_name}"] = status
+        results.discovered_count = len(results)
+        errors = []
+        if parse_errors:
+            errors.append(
+                f"Go test JSON output contained {parse_errors} malformed event line(s)."
+            )
+        if build_failures:
+            errors.append(f"Go test reported {build_failures} package build failure(s).")
+        if errors:
+            results.report_error = " ".join(errors)
+        return results
+
     def is_real_failure(self, code: int, out: str) -> bool:
         return code > 0 and "not installed in PATH" not in out
+
+    def has_no_tests_evidence(self, exit_code: int, diagnostics: str, results: Dict[str, str]) -> bool:
+        return (
+            exit_code == 0
+            and not results
+            and "[no test files]" in diagnostics.lower()
+        )
 
     def is_new_test(self, test_id: str) -> bool:
         return "FeaturePatch" in test_id or "feature_patch" in test_id.lower()

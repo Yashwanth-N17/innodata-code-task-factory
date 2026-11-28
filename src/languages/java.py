@@ -11,7 +11,7 @@ import shutil
 import subprocess
 from typing import Any, Dict, List, Optional, Tuple
 
-from .base import BaseLanguageAdapter, DEFAULT_IGNORED_DIRS, parse_junit_xml
+from .base import BaseLanguageAdapter, DEFAULT_IGNORED_DIRS, TestResultMap, parse_junit_xml
 
 
 _JAVA_IMPORT_RE = re.compile(r"^\s*import\s+(?:static\s+)?([^;]+);")
@@ -130,7 +130,6 @@ class JavaAdapter(BaseLanguageAdapter):
             cmd = [mvn, "-B", "test"]
             if target_test:
                 cmd.append("-Dtest=FeaturePatchTest")
-            report_glob = os.path.join(work_dir, "**", "target", "surefire-reports", "TEST-*.xml")
         else:
             gradlew = os.path.join(work_dir, "gradlew")
             gradle = gradlew if os.path.isfile(gradlew) else shutil.which("gradle")
@@ -139,24 +138,104 @@ class JavaAdapter(BaseLanguageAdapter):
             cmd = [gradle, "test"]
             if target_test:
                 cmd.extend(["--tests", "FeaturePatchTest"])
-            report_glob = os.path.join(work_dir, "**", "build", "test-results", "**", "TEST-*.xml")
+
+        clear_error = self.clear_stale_test_reports(work_dir)
+        if clear_error:
+            return -1, clear_error, {}
 
         try:
             res = subprocess.run(
                 cmd, cwd=work_dir, capture_output=True, text=True,
                 encoding="utf-8", errors="replace", timeout=timeout,
             )
-            results: Dict[str, str] = {}
-            for xml_file in glob.glob(report_glob, recursive=True):
-                results.update(parse_junit_xml(xml_file))
-            return res.returncode, res.stdout + "\n" + res.stderr, results
+            diagnostics = res.stdout + "\n" + res.stderr
+            return (
+                res.returncode,
+                diagnostics,
+                self.collect_test_results(work_dir, res.returncode, diagnostics),
+            )
         except subprocess.TimeoutExpired:
             return -1, f"Java test execution timed out after {timeout} seconds.", {}
         except Exception as e:
             return -1, f"Java test execution failed: {e}", {}
 
+    @staticmethod
+    def test_report_globs(work_dir: str) -> List[str]:
+        if os.path.isfile(os.path.join(work_dir, "pom.xml")):
+            return [
+                os.path.join(
+                    work_dir, "**", "target", "surefire-reports", "TEST-*.xml"
+                )
+            ]
+        return [
+            os.path.join(
+                work_dir, "**", "build", "test-results", "**", "TEST-*.xml"
+            )
+        ]
+
+    def clear_stale_test_reports(self, work_dir: str) -> Optional[str]:
+        try:
+            for report_glob in self.test_report_globs(work_dir):
+                for stale_report in glob.glob(report_glob, recursive=True):
+                    os.remove(stale_report)
+        except OSError as exc:
+            return f"Could not clear stale Java test report: {exc}"
+        return None
+
+    def collect_test_results(
+        self,
+        work_dir: str,
+        exit_code: int,
+        diagnostics: str = "",
+    ) -> TestResultMap:
+        results = TestResultMap()
+        discovered_count = 0
+        found_report = False
+        report_errors = []
+        for report_glob in self.test_report_globs(work_dir):
+            for xml_file in glob.glob(report_glob, recursive=True):
+                found_report = True
+                parsed = parse_junit_xml(xml_file)
+                results.update(parsed)
+                discovered_count += parsed.discovered_count or 0
+                if parsed.report_error:
+                    report_errors.append(parsed.report_error)
+        if found_report:
+            results.discovered_count = discovered_count
+            results.report_present = True
+        if report_errors:
+            results.report_error = "; ".join(report_errors)
+        elif exit_code == 0 and not found_report:
+            results.report_error = "Java JUnit report is missing."
+        if re.search(
+            r"\bcompilation error\b|failed to execute goal [^\r\n]*maven-compiler-plugin|"
+            r"execution failed for task ['\"]:[^'\"]*compile(?:Java|TestJava)['\"]",
+            diagnostics,
+            re.IGNORECASE | re.DOTALL,
+        ):
+            results.report_error = (
+                (results.report_error + " " if results.report_error else "")
+                + "Java build reported a compilation failure."
+            )
+        return results
+
     def is_real_failure(self, code: int, out: str) -> bool:
         return code > 0 and "is not installed in PATH" not in out
+
+    def has_no_tests_evidence(self, exit_code: int, diagnostics: str, results: Dict[str, str]) -> bool:
+        lower = diagnostics.lower()
+        return (
+            exit_code == 0
+            and not results
+            and (
+                any(message in lower for message in (
+                    "no tests to run",
+                    "no tests found for given includes",
+                    "no tests found",
+                ))
+                or bool(re.search(r"\btask\s+:\S*test\s+no-source\b", lower))
+            )
+        )
 
     def is_new_test(self, test_id: str) -> bool:
         return "FeaturePatchTest" in test_id

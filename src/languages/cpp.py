@@ -113,22 +113,63 @@ class CppAdapter(BaseLanguageAdapter):
             info["build_system"] = "cmake"
             info["manifests"] = [os.path.relpath(p, repo_path) for p in sorted(cmake_files)]
 
-        for cm in cmake_files:
+        root_cmake = os.path.join(repo_path, "CMakeLists.txt")
+        if os.path.isfile(root_cmake):
+            try:
+                with open(root_cmake, "r", encoding="utf-8", errors="replace") as f:
+                    root_content = f.read()
+                proj_m = re.search(
+                    r"project\s*\(\s*([A-Za-z0-9_.-]+)",
+                    root_content,
+                    re.IGNORECASE,
+                )
+                if proj_m:
+                    info["package_name"] = proj_m.group(1)
+            except OSError:
+                pass
+
+        for cm in sorted(cmake_files):
             try:
                 with open(cm, "r", encoding="utf-8", errors="replace") as f:
                     content = f.read()
-                proj_m = re.search(r"project\s*\(\s*([A-Za-z0-9_.-]+)", content, re.IGNORECASE)
-                if proj_m and cm == os.path.join(repo_path, "CMakeLists.txt"):
-                    info["package_name"] = proj_m.group(1)
 
                 std_m = re.search(r"CMAKE_CXX_STANDARD\s+(\d+)", content)
                 if std_m:
                     info["cpp_standard"] = f"c++{std_m.group(1)}"
 
-                for lib_m in re.finditer(r"add_library\s*\(\s*([A-Za-z0-9_.-]+)(?:\s+(STATIC|SHARED|OBJECT|INTERFACE))?", content, re.IGNORECASE):
-                    tname = lib_m.group(1)
+                variables = {"PROJECT_NAME": info["package_name"]}
+                variable_matches = re.finditer(
+                    r"(?im)^\s*set\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s+([^\s)]+)",
+                    content,
+                )
+                for var_m in variable_matches:
+                    variables[var_m.group(1)] = var_m.group(2).strip("\"'")
+
+                def resolve_cmake_value(value: str) -> str:
+                    for _ in range(len(variables) + 1):
+                        resolved = re.sub(
+                            r"\$\{([^}]+)\}",
+                            lambda match: variables.get(match.group(1), match.group(0)),
+                            value,
+                        )
+                        if resolved == value:
+                            break
+                        value = resolved
+                    return value
+
+                library_matches = re.finditer(
+                    r"add_library\s*\(\s*([^\s()]+)(?:\s+([A-Za-z_]+))?",
+                    content,
+                    re.IGNORECASE,
+                )
+                for lib_m in library_matches:
+                    tname = resolve_cmake_value(lib_m.group(1))
                     tkind = (lib_m.group(2) or "").upper()
-                    if tkind != "OBJECT" and not tname.startswith("${") and tname not in info["cmake_targets"]:
+                    if (
+                        tkind != "OBJECT"
+                        and "${" not in tname
+                        and tname not in info["cmake_targets"]
+                    ):
                         info["cmake_targets"].append(tname)
 
                 for opt_m in re.finditer(r"option\s*\(\s*([A-Z0-9_]*TEST[A-Z0-9_]*)\b", content):
@@ -356,6 +397,11 @@ class CppAdapter(BaseLanguageAdapter):
             return
 
         targets = list(manifest.get("cmake_targets") or [])
+        targets.sort(
+            key=lambda target: (
+                0 if target.lower().endswith("_static") else 1
+            )
+        )
         targets_str = " ".join(targets)
         link_block = ""
         if targets_str:
@@ -413,6 +459,16 @@ endif()
 
         build_dir = os.path.join(work_dir, "_factory_build")
         configure_cmd = [cmake_bin, "-S", work_dir, "-B", build_dir]
+        mingw_make = shutil.which("mingw32-make") if os.name == "nt" else None
+        if mingw_make and not os.environ.get("CMAKE_GENERATOR"):
+            configure_cmd.extend([
+                "-G",
+                "MinGW Makefiles",
+                f"-DCMAKE_MAKE_PROGRAM={mingw_make}",
+            ])
+            compiler = shutil.which("g++")
+            if compiler:
+                configure_cmd.append(f"-DCMAKE_CXX_COMPILER={compiler}")
         for opt in manifest.get("test_options") or []:
             configure_cmd.append(f"-D{opt}=ON")
         for opt in manifest.get("disable_options") or []:
@@ -551,6 +607,25 @@ endif()
         if "timed out after" in out:
             return False
         return True
+
+    def has_no_tests_evidence(self, exit_code: int, diagnostics: str, results: Dict[str, str]) -> bool:
+        lower = diagnostics.lower()
+        return (
+            exit_code == 0
+            and not results
+            and (
+                "no existing c++ test suite found" in lower
+                or "no tests were found" in lower
+            )
+        )
+
+    def normalize_test_status(self, test_id: str, status: str) -> str:
+        if test_id.endswith("::compile"):
+            return "error"
+        return status.lower()
+
+    def is_test_executed_result(self, test_id: str, status: str) -> bool:
+        return not test_id.endswith("::compile") and status in ("passed", "failed")
 
     def is_new_test(self, test_id: str) -> bool:
         return "factory_feature_test" in test_id or "test_feature_patch" in test_id

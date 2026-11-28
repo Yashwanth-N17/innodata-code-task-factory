@@ -10,6 +10,8 @@ import subprocess
 from typing import Dict, Optional, Tuple
 from urllib.parse import urlparse
 
+from .js_package_manager import JSBootstrapError, JSPackageManager
+
 
 _URL_PREFIXES = ("https://", "http://", "git@", "ssh://", "git://", "file://")
 
@@ -157,15 +159,52 @@ def bootstrap_environment(repo_path: str, language_id: str) -> str:
         return f"Python virtualenv ready at {venv_dir}"
 
     if language_id == "typescript":
-        for pm in ("pnpm", "npm", "yarn"):
-            pm_bin = shutil.which(pm)
-            if pm_bin and not os.path.isdir(os.path.join(abs_repo, "node_modules")):
-                subprocess.run([pm_bin, "install"], cwd=abs_repo, check=False)
-                return f"Installed JS/TS dependencies via {pm}"
-        return "Using existing node_modules or Node native runner"
+        return bootstrap_js_environment(abs_repo, timeout=180)
 
     if language_id == "cpp":
         cmake_bin = shutil.which("cmake")
         return f"CMake available at {cmake_bin}" if cmake_bin else "CMake missing in PATH"
 
     return f"No bootstrap steps configured for {language_id}"
+
+
+def bootstrap_js_environment(repo_path: str, timeout: int = 180) -> str:
+    """Bootstrap JavaScript/TypeScript dependencies for a repository.
+
+    Uses the package manager declared in ``package.json`` (``packageManager`` field)
+    as the source of truth, falling back to lockfile detection. Installs dependencies
+    using the manager's frozen/immutable install mode where supported.
+
+    Raises :class:`src.js_package_manager.JSBootstrapError` on any setup failure
+    (missing executable, version mismatch, install failure) so callers can distinguish
+    setup failures from code-generation or verification failures. A missing or
+    incompatible package manager is never reported as successful dependency setup.
+    """
+    installer = JSPackageManager(repo_path, timeout=timeout)
+    info = installer.detect()
+    if not info:
+        return "Using existing node_modules or Node native runner"
+
+    if not info.executable:
+        raise JSBootstrapError(
+            f"Package manager '{info.name}' is declared in package.json but its "
+            f"executable was not found on PATH."
+            + (f" Declared version: {info.version}." if info.version else ""),
+            package_manager=info.name,
+            expected_version=info.version,
+            hint=(
+                f"Install {info.name} (e.g. via Corepack or npm) and ensure it is on "
+                f"PATH before running dependency bootstrap."
+            ),
+        )
+
+    ok, reason, actual = installer.check()
+    if not ok:
+        raise JSBootstrapError(
+            reason or "Package-manager check failed.",
+            package_manager=info.name,
+            expected_version=info.version,
+            actual_version=actual,
+        )
+
+    return installer.install()

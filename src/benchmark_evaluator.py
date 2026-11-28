@@ -5,114 +5,392 @@ against generated task packages with full codebase context, aggregates Pass@1 so
 rates by language and archetype, and generates JSON & Markdown leaderboards.
 """
 
-import glob
+# import os
+# from typing import Dict, Any
+# from .verifier import SandboxVerifier
+# from .config import call_llm
+
+
+# class BenchmarkEvaluator:
+#     def __init__(self, task_dir: str, target_repo_path: str, prompt_template_path: str = None):
+#         self.task_dir = os.path.abspath(task_dir)
+#         self.target_repo_path = os.path.abspath(target_repo_path)
+#         self.verifier = SandboxVerifier(target_repo_path)
+#         if not prompt_template_path:
+#             prompt_template_path = os.path.join(
+#                 os.path.dirname(__file__), "..", "prompts", "evaluator_prompt.txt"
+#             )
+#         with open(prompt_template_path, "r", encoding="utf-8") as f:
+#             self.eval_prompt_template = f.read()
+
+#     def evaluate_model(self, model_name: str = "claude-3-5-sonnet") -> Dict[str, Any]:
+#         """Evaluate an AI model against this task package."""
+#         instruction_path = os.path.join(self.task_dir, "instruction.md")
+#         test_file_path = os.path.join(self.task_dir, "tests", "test_feature_patch.py")
+
+#         with open(instruction_path, "r", encoding="utf-8") as f:
+#             instruction_md = f.read()
+
+#         with open(test_file_path, "r", encoding="utf-8") as f:
+#             test_code = f.read()
+
+#         # Step 1: Prompt the target model with instruction.md
+#         prompt = f"""{self.eval_prompt_template}
+
+# Task Specification (instruction.md):
+# {instruction_md}
+# """
+#         agent_diff = call_llm(prompt=prompt)
+
+#         # Step 2: Grade the model using our 3-step verifier
+#         result = self.verifier.verify(solution_diff=agent_diff, test_code=test_code)
+
+#         return {
+#             "model_tested": model_name,
+#             "task_id": os.path.basename(self.task_dir),
+#             "passed": result.is_valid,
+#             "baseline_passed": result.step1_baseline_pass,
+#             "patch_clean": result.patch_applied_cleanly,
+#             "tests_passed": result.step3_positive_pass,
+#         }
+
+
+"""
+Feature 8: Frontier AI Benchmark Evaluation Harness.
+Prompts external frontier models with generated `instruction.md` files and codebase context,
+extracts their proposed unified Git diff, grades the patch via SandboxVerifier,
+and aggregates Pass@1 benchmark reports across task suites.
+"""
+
+import argparse
+import inspect
 import json
+import logging
 import os
 import re
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
-from .analyzer import CodebaseAnalyzer
-from .config import Config, call_llm
+try:
+    import tomllib  # Built into Python 3.11+
+except ModuleNotFoundError:
+    try:
+        import tomli as tomllib  # Backport for Python <= 3.10
+    except ModuleNotFoundError:
+        tomllib = None
+
+from .config import Config, LLMProviderError, call_llm
 from .verifier import SandboxVerifier
 
+try:
+    from .analyzer import CodebaseAnalyzer
+except ImportError:
+    CodebaseAnalyzer = None
 
-def infer_provider(model_name: str, explicit_provider: Optional[str] = None) -> Optional[str]:
-    """Infer LLM provider from model_name while honoring mock mode and explicit overrides."""
+logger = logging.getLogger(__name__)
+
+__all__ = ["BenchmarkEvaluator", "BatchBenchmarkRunner", "infer_provider"]
+
+# Default retry parameters for LLM API calls
+_DEFAULT_MAX_RETRIES = 3
+_DEFAULT_RETRY_BACKOFF = 2.0  # seconds; doubles each attempt
+
+
+def infer_provider(model_name: str, explicit_provider: Optional[str] = None) -> str:
+    """Choose an LLM provider from a model identifier, honoring an explicit override."""
     if explicit_provider and explicit_provider.strip():
         return explicit_provider.strip().lower()
-    # Only fall back to mock if explicitly in mock mode
-    if explicit_provider == "mock":
-        return "mock"
-    # Provider-prefixed names (openai/gpt-4o, anthropic/claude-..., openrouter/...)
-    m = (model_name or "").strip().lower()
-    if "/" in m:
-        prefix, rest = m.split("/", 1)
-        if prefix in ("openai", "anthropic", "gemini", "deepseek", "openrouter", "groq", "ollama", "localai", "vllm"):
-            if prefix == "openrouter":
-                # infer from rest
-                m = rest
-            else:
-                # map known prefixes
-                if prefix == "openai":
-                    return "openai"
-                if prefix == "anthropic":
-                    return "anthropic"
-                if prefix == "gemini":
-                    return "gemini"
-                if prefix == "deepseek":
-                    return "deepseek"
-                if prefix in ("ollama", "localai", "vllm"):
-                    return prefix
-                if prefix == "groq":
-                    return "openai"
-    base = m.split("/")[-1]
-    if base.startswith("claude"):
+
+    normalized = (model_name or "").strip().lower()
+    model_id = normalized.rsplit("/", 1)[-1]
+    if "claude" in normalized or normalized.startswith("anthropic/"):
         return "anthropic"
-    if base.startswith("gemini"):
+    if "gemini" in normalized or normalized.startswith("google/"):
         return "gemini"
-    if base.startswith(("gpt-", "o1", "o3", "o4")) or base.startswith(("o1", "o3", "o4")):
-        return "openai"
-    if base.startswith("deepseek"):
+    if "deepseek" in normalized:
         return "deepseek"
-    # Mock fallback only if Config explicitly mock
-    if (Config.LLM_PROVIDER or "").strip().lower() == "mock":
-        return "mock"
-    return None
-
-
-def _clean_diff(raw_output: str) -> str:
-    cleaned = (raw_output or "").strip()
-    cleaned = re.sub(r"^```[a-zA-Z0-9_+-]*\s*", "", cleaned)
-    cleaned = re.sub(r"\s*```$", "", cleaned)
-    return (cleaned.strip() + "\n") if cleaned.strip() else ""
+    if any(token in model_id for token in ("llama", "mixtral")):
+        return "groq"
+    if model_id.startswith(("gpt-", "o1", "o3", "o4")) or "openai/" in normalized:
+        return "openai"
+    return Config.LLM_PROVIDER
 
 
 class BenchmarkEvaluator:
     def __init__(
         self,
-        task_dir: str,
-        target_repo_path: str,
+        task_dir: Optional[str] = None,
+        target_repo_path: str = ".",
         prompt_template_path: Optional[str] = None,
         language: Optional[str] = None,
         timeout: int = 90,
     ):
-        self.task_dir = os.path.abspath(task_dir)
+        self.task_dir = os.path.abspath(task_dir) if task_dir else None
         self.target_repo_path = os.path.abspath(target_repo_path)
-        self.verifier = SandboxVerifier(target_repo_path, timeout=timeout, language=language)
+        self.verifier = SandboxVerifier(
+            self.target_repo_path,
+            language=language,
+            timeout=timeout,
+        )
+
         if not prompt_template_path:
             prompt_template_path = os.path.join(
                 os.path.dirname(__file__), "..", "prompts", "evaluator_prompt.txt"
             )
-        with open(prompt_template_path, "r", encoding="utf-8") as f:
-            self.eval_prompt_template = f.read()
 
-    def _find_test_file(self) -> str:
-        candidates = sorted(glob.glob(os.path.join(self.task_dir, "tests", "test_feature_patch.*")))
-        if candidates:
-            return candidates[0]
-        return os.path.join(self.task_dir, "tests", "test_feature_patch.py")
+        if os.path.exists(prompt_template_path):
+            with open(prompt_template_path, "r", encoding="utf-8") as f:
+                self.eval_prompt_template = f.read().strip()
+        else:
+            self.eval_prompt_template = (
+                "You are an expert Python engineer. Return ONLY a valid unified Git diff "
+                "solving the given issue without modifying test files."
+            )
 
-    def _load_task_metadata(self) -> Dict[str, Any]:
-        meta_path = os.path.join(self.task_dir, "validation_report.json")
-        if os.path.isfile(meta_path):
+        self._cached_repo_context: Optional[str] = None
+
+    def _get_repo_context(self) -> str:
+        """Lazily scan and cache the target repository context using Feature 1."""
+        if self._cached_repo_context is not None:
+            return self._cached_repo_context
+
+        if CodebaseAnalyzer is not None:
             try:
-                with open(meta_path, "r", encoding="utf-8") as f:
-                    return json.load(f)
-            except Exception:
-                pass
-        return {}
+                analyzer = CodebaseAnalyzer(self.target_repo_path)
+                self._cached_repo_context = analyzer.get_context_prompt()
+                return self._cached_repo_context
+            except Exception as exc:
+                self._cached_repo_context = f"(Repository scan unavailable: {exc})"
+                return self._cached_repo_context
+
+        self._cached_repo_context = "(CodebaseAnalyzer not available)"
+        return self._cached_repo_context
+
+    def _load_task_metadata(self, task_dir: str) -> Dict[str, Any]:
+        """Parse optional task.toml metadata (e.g., archetype/category) safely."""
+        toml_path = os.path.join(task_dir, "task.toml")
+        if not os.path.exists(toml_path):
+            return {}
+
+        if tomllib is None:
+            logger.warning(
+                "Neither tomllib (Python 3.11+) nor tomli is available; "
+                "task.toml metadata will be skipped for %s",
+                task_dir,
+            )
+            return {}
+
+        try:
+            with open(toml_path, "rb") as f:
+                return tomllib.load(f)
+        except Exception:
+            return {}
+
+    def _extract_archetype(self, metadata: Dict[str, Any]) -> str:
+        """Locate the task archetype or category from parsed task.toml data."""
+        for key in ("archetype", "category"):
+            if key in metadata and isinstance(metadata[key], str):
+                return metadata[key]
+        for section in ("task", "metadata"):
+            nested = metadata.get(section)
+            if isinstance(nested, dict):
+                for key in ("archetype", "category"):
+                    if key in nested and isinstance(nested[key], str):
+                        return nested[key]
+        return "unknown"
+
+    def _build_prompts(self, repo_context: str, instruction_md: str) -> Tuple[str, str]:
+        """Build `(system_prompt, user_prompt)` cleanly without leaving unformatted placeholders."""
+        template = self.eval_prompt_template
+        if "{codebase_context}" in template or "{instruction_md}" in template:
+            rendered = (
+                template
+                .replace("{codebase_context}", repo_context)
+                .replace("{instruction_md}", instruction_md)
+            )
+            system_prompt = (
+                "You are an expert software engineer. "
+                "Follow the specification and output ONLY a valid unified Git diff."
+            )
+            return system_prompt, rendered
+
+        user_prompt = (
+            f"Target Codebase Context:\n{repo_context}\n\n"
+            f"Task Specification (instruction.md):\n{instruction_md}\n"
+        )
+        return template, user_prompt
+
+    def _invoke_model(
+        self,
+        user_prompt: str,
+        model_name: str,
+        system_prompt: Optional[str] = None,
+        provider: Optional[str] = None,
+    ) -> str:
+        """
+        Adaptively call src.config.call_llm() with exponential-backoff retry.
+        Inspects its signature so model_name and system_prompt are forwarded
+        only when supported by the current config.py implementation.
+
+        for now it is just calling placeholder texts and running mock tests,
+        but it is supposed to call actual LLM APIs and return response text
+        """
+        sig = inspect.signature(call_llm)
+        params = sig.parameters
+        accepts_kwargs = any(
+            p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+        )
+
+        active_system_prompt = (
+            self.eval_prompt_template if system_prompt is None else system_prompt
+        )
+        call_kwargs: Dict[str, Any] = {}
+
+        if "system_prompt" in params or accepts_kwargs:
+            call_kwargs["system_prompt"] = active_system_prompt
+            call_kwargs["prompt"] = user_prompt
+        else:
+            call_kwargs["prompt"] = (
+                f"{active_system_prompt}\n\n{user_prompt}" if active_system_prompt else user_prompt
+            )
+
+        if "model" in params or accepts_kwargs:
+            call_kwargs["model"] = model_name
+        elif "model_name" in params:
+            call_kwargs["model_name"] = model_name
+        if provider and ("provider" in params or accepts_kwargs):
+            call_kwargs["provider"] = provider
+
+        last_exc: Optional[Exception] = None
+        for attempt in range(_DEFAULT_MAX_RETRIES):
+            try:
+                response = call_llm(**call_kwargs)
+                return response if isinstance(response, str) else str(response)
+            except Exception as exc:
+                if isinstance(exc, LLMProviderError) and not exc.retryable:
+                    raise
+                last_exc = exc
+                if attempt < _DEFAULT_MAX_RETRIES - 1:
+                    wait = _DEFAULT_RETRY_BACKOFF * (2 ** attempt)
+                    error_type = (
+                        exc.error_type
+                        if isinstance(exc, LLMProviderError)
+                        else type(exc).__name__
+                    )
+                    status = exc.status if isinstance(exc, LLMProviderError) else None
+                    logger.warning(
+                        "LLM call attempt %d/%d failed (error_type=%s status=%s), "
+                        "retrying in %.1fs",
+                        attempt + 1,
+                        _DEFAULT_MAX_RETRIES,
+                        error_type,
+                        status if status is not None else "unknown",
+                        wait,
+                    )
+                    time.sleep(wait)
+        raise last_exc  # type: ignore[misc]
+
+    @staticmethod
+    def _extract_diff(raw_response: str) -> str:
+        """
+        Strip Markdown code fences and conversational filler from raw LLM output
+        to isolate a clean unified Git diff patch.  When the response contains
+        multiple fenced diff blocks (e.g. one per file), they are concatenated.
+        """
+        if not raw_response or not raw_response.strip():
+            return ""
+
+        text = raw_response.replace("\r\n", "\n").strip()
+
+        # 1. Collect all fenced code blocks that look like diffs
+        fenced_blocks = re.findall(
+            r"```(?:diff|patch)?\s*\n(.*?)```", text, flags=re.DOTALL | re.IGNORECASE
+        )
+        diff_blocks = [
+            block.strip()
+            for block in fenced_blocks
+            if "diff --git " in block or ("--- " in block and "+++ " in block)
+        ]
+
+        candidate = "\n".join(diff_blocks) if diff_blocks else text
+
+        # 2. Trim any prose appearing before the first unified diff header
+        start_match = re.search(
+            r"^(?:diff --git |--- a/|--- )", candidate, flags=re.MULTILINE
+        )
+        if not start_match:
+            return ""
+
+        cleaned = candidate[start_match.start():].strip()
+
+        # 3. Validate essential unified diff markers
+        has_headers = "--- " in cleaned and "+++ " in cleaned
+        has_hunk = "@@" in cleaned
+        if not (has_headers and has_hunk):
+            return ""
+
+        # git apply expects a trailing newline
+        return cleaned + "\n"
+
+    @staticmethod
+    def _extract_verifier_logs(result: Any) -> Dict[str, Any]:
+        """Safely gather diagnostic logs exposed by VerificationResult."""
+        log_fields = (
+            "logs",
+            "stdout",
+            "stderr",
+            "error",
+            "error_message",
+            "step1_output",
+            "step2_output",
+            "step3_output",
+        )
+        captured: Dict[str, Any] = {}
+        for field in log_fields:
+            value = getattr(result, field, None)
+            if value:
+                captured[field] = value
+        return captured
 
     def evaluate_model(
         self,
         model_name: str = "claude-3-5-sonnet",
-        provider: Optional[str] = None,
-        max_context_files: int = 4,
+        task_dir: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Evaluate an AI model against this packaged task using real repository context."""
-        instruction_path = os.path.join(self.task_dir, "instruction.md")
-        test_file_path = self._find_test_file()
-        task_meta = self._load_task_metadata()
+        """Evaluate a single AI model against one packaged task directory. 
+        Evaluating it using Pass@1, the number of passed tests and the failure reason if any will be shown"""
+        active_task_dir = os.path.abspath(task_dir) if task_dir else self.task_dir
+        if not active_task_dir:
+            raise ValueError("A task_dir must be provided either in __init__ or evaluate_model().")
+
+        task_id = os.path.basename(active_task_dir)
+        instruction_path = os.path.join(active_task_dir, "instruction.md")
+        test_relpath = self.verifier.adapter.test_file_relpath
+        test_file_path = os.path.join(active_task_dir, test_relpath)
+
+        metadata = self._load_task_metadata(active_task_dir)
+        archetype = self._extract_archetype(metadata)
+
+        # Base audit structure (preserves original starter keys for compatibility)
+        audit: Dict[str, Any] = {
+            "model_tested":model_name, #the name of the model to be tested, gpt sol, fable, or even hydrogen if APi key is there
+            "task_id": task_id,
+            "archetype": archetype,
+            "passed": False,
+            "baseline_passed": False,
+            "patch_clean": False,
+            "tests_passed": False,
+            "failure_reason": "none",
+            "latency_seconds": 0.0,
+            "logs": {},
+        }
+
+        if not os.path.exists(instruction_path) or not os.path.exists(test_file_path):
+            audit["failure_reason"] = "missing_task_files"
+            audit["logs"] = {
+                "error": f"Expected instruction.md and {test_relpath} inside {active_task_dir}"
+            }
+            return audit
 
         with open(instruction_path, "r", encoding="utf-8") as f:
             instruction_md = f.read()
@@ -120,166 +398,316 @@ class BenchmarkEvaluator:
         with open(test_file_path, "r", encoding="utf-8") as f:
             test_code = f.read()
 
-        analyzer = CodebaseAnalyzer(self.target_repo_path, language=self.verifier.adapter.language_id)
-        codebase_context = analyzer.get_targeted_context(max_files=max_context_files)
+        # Step 1: Assemble context + specification (never expose solution.diff or tests)
+        repo_context = self._get_repo_context()
+        system_prompt, user_prompt = self._build_prompts(repo_context, instruction_md)
 
-        prompt = f"""{self.eval_prompt_template}
-
-Target Codebase Context:
-{codebase_context}
-
-Task Specification (instruction.md):
-{instruction_md}
-
-Return ONLY a clean unified Git diff (`git diff`) implementing this specification.
-"""
-        resolved_provider = infer_provider(model_name, explicit_provider=provider)
-        t0 = time.monotonic()
-        raw_diff = call_llm(
-            prompt=prompt,
-            model=model_name,
-            provider=resolved_provider,
-            language=self.verifier.adapter.language_id,
+        start_time = time.perf_counter()
+        provider = (
+            "mock"
+            if Config.LLM_PROVIDER.strip().lower() == "mock"
+            else infer_provider(model_name)
         )
-        llm_latency_ms = round((time.monotonic() - t0) * 1000.0, 2)
-        agent_diff = _clean_diff(raw_diff)
-
-        result = self.verifier.verify(solution_diff=agent_diff, test_code=test_code)
-
-        return {
-            "model_tested": model_name,
-            "provider": resolved_provider or Config.LLM_PROVIDER,
-            "task_id": os.path.basename(self.task_dir),
-            "language": self.verifier.adapter.language_id,
-            "category": task_meta.get("category", "unknown"),
-            "passed": result.is_valid,
-            "baseline_passed": result.step1_baseline_pass,
-            "patch_clean": result.patch_applied_cleanly,
-            "tests_passed": result.step3_positive_pass,
-            "fail_to_pass_count": len(result.fail_to_pass),
-            "pass_to_pass_count": len(result.pass_to_pass),
-            "llm_latency_ms": llm_latency_ms,
-        }
-
-
-class BatchBenchmarkRunner:
-    """Evaluates multiple task packages across multiple frontier models and builds a leaderboard."""
-
-    def __init__(self, target_repo_path: str, language: Optional[str] = None, timeout: int = 90):
-        self.target_repo_path = os.path.abspath(target_repo_path)
-        self.language = language
-        self.timeout = timeout
-
-    def discover_tasks(self, tasks_root: str) -> List[str]:
-        if not os.path.isdir(tasks_root):
-            return []
-        dirs = []
-        for entry in sorted(os.listdir(tasks_root)):
-            full = os.path.join(tasks_root, entry)
-            if os.path.isdir(full) and os.path.isfile(os.path.join(full, "instruction.md")):
-                dirs.append(full)
-        return dirs
-
-    def run(
-        self,
-        task_dirs: List[str],
-        models: List[str],
-        output_dir: str = "benchmark_results",
-    ) -> Dict[str, Any]:
-        os.makedirs(output_dir, exist_ok=True)
-        rows: List[Dict[str, Any]] = []
-
-        for task_dir in task_dirs:
-            evaluator = BenchmarkEvaluator(
-                task_dir=task_dir,
-                target_repo_path=self.target_repo_path,
-                language=self.language,
-                timeout=self.timeout,
+        try:
+            raw_response = self._invoke_model(
+                user_prompt=user_prompt,
+                model_name=model_name,
+                system_prompt=system_prompt,
+                provider=provider,
             )
-            for model in models:
-                try:
-                    rows.append(evaluator.evaluate_model(model_name=model))
-                except Exception as exc:
-                    import logging
-                    logging.error("Model %s evaluation failed: %s", model, exc)
-                    rows.append({"model_tested": model, "passed": False, "patch_clean": False, "llm_latency_ms": 0, "error": str(exc), "status": "FAILED"})
+        except Exception as exc:
+            audit["latency_seconds"] = round(time.perf_counter() - start_time, 3)
+            audit["failure_reason"] = "api_error"
+            audit["logs"] = {"error": str(exc)}
+            return audit
 
-        leaderboard = self._aggregate_leaderboard(rows)
-        report = {
-            "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "repo_path": self.target_repo_path,
+        audit["latency_seconds"] = round(time.perf_counter() - start_time, 3)
+
+        # Step 2: Extract and validate the unified Git diff
+        clean_diff = self._extract_diff(raw_response)
+        if not clean_diff:
+            audit["failure_reason"] = "malformed_diff"
+            audit["logs"] = {"raw_response_preview": raw_response[:500]}
+            return audit
+
+        # Step 3: Grade the proposed patch inside Feature 5's SandboxVerifier
+        try:
+            result = self.verifier.verify(solution_diff=clean_diff, test_code=test_code)
+        except Exception as exc:
+            audit["failure_reason"] = "verifier_error"
+            audit["logs"] = {"error": str(exc)}
+            return audit
+
+        audit["passed"] = bool(getattr(result, "is_valid", False))
+        audit["baseline_passed"] = bool(getattr(result, "step1_baseline_pass", False))
+        audit["patch_clean"] = bool(getattr(result, "patch_applied_cleanly", False))
+        audit["tests_passed"] = bool(getattr(result, "step3_positive_pass", False))
+        audit["logs"] = self._extract_verifier_logs(result)
+
+        if not audit["passed"]:
+            if not audit["baseline_passed"]:
+                audit["failure_reason"] = "baseline_failed"
+            elif not audit["patch_clean"]:
+                audit["failure_reason"] = "patch_apply_failed"
+            elif not audit["tests_passed"]:
+                audit["failure_reason"] = "test_failed"
+            else:
+                audit["failure_reason"] = "verification_failed"
+
+        return audit
+
+    def evaluate_suite(
+        self,
+        tasks_root_dir: str,
+        models: Optional[List[str]] = None,
+        output_report_path: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Evaluate one or more frontier models across every packaged task in tasks_root_dir,
+        computing Pass@1 solve rates, failure breakdowns, and per-archetype scores.
+        """
+        models = models or ["claude-3-5-sonnet"]
+        tasks_root_dir = os.path.abspath(tasks_root_dir)
+
+        task_dirs: List[str] = []
+        if os.path.isdir(tasks_root_dir):
+            for entry in sorted(os.listdir(tasks_root_dir)):
+                candidate = os.path.join(tasks_root_dir, entry)
+                if os.path.isdir(candidate) and os.path.exists(
+                    os.path.join(candidate, "instruction.md")
+                ):
+                    task_dirs.append(candidate)
+
+        report: Dict[str, Any] = {
+            "target_repo": self.target_repo_path,
+            "tasks_root": tasks_root_dir,
             "total_tasks": len(task_dirs),
-            "models": models,
-            "leaderboard": leaderboard,
-            "results": rows,
+            "models": {},
         }
 
-        json_path = os.path.join(output_dir, "leaderboard.json")
-        with open(json_path, "w", encoding="utf-8") as f:
-            json.dump(report, f, indent=2)
+        for model_name in models:
+            task_results: List[Dict[str, Any]] = []
+            failure_breakdown: Dict[str, int] = {}
+            archetype_stats: Dict[str, Dict[str, int]] = {}
+            resolved = 0
 
-        md_path = os.path.join(output_dir, "leaderboard.md")
-        with open(md_path, "w", encoding="utf-8") as f:
-            f.write(self.render_markdown_leaderboard(report))
+            for task_path in task_dirs:
+                outcome = self.evaluate_model(model_name=model_name, task_dir=task_path)
+                task_results.append(outcome)
+
+                arch = outcome["archetype"]
+                if arch not in archetype_stats:
+                    archetype_stats[arch] = {"passed": 0, "total": 0}
+                archetype_stats[arch]["total"] += 1
+
+                if outcome["passed"]:
+                    resolved += 1
+                    archetype_stats[arch]["passed"] += 1
+                else:
+                    reason = outcome["failure_reason"]
+                    failure_breakdown[reason] = failure_breakdown.get(reason, 0) + 1
+
+            total = len(task_dirs)
+            solve_rate = round((resolved / total) * 100.0, 2) if total > 0 else 0.0
+
+            report["models"][model_name] = {
+                "resolved": resolved,
+                "total": total,
+                "pass_at_1_percent": solve_rate,
+                "failure_breakdown": failure_breakdown,
+                "archetype_breakdown": archetype_stats,
+                "task_results": task_results,
+            }
+
+        if output_report_path:
+            output_abs = os.path.abspath(output_report_path)
+            parent = os.path.dirname(output_abs)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            with open(output_abs, "w", encoding="utf-8") as f:
+                json.dump(report, f, indent=2)
 
         return report
 
+
+class BatchBenchmarkRunner:
+    """Evaluate packaged task suites against model identifiers and write leaderboard reports."""
+
+    def __init__(
+        self,
+        target_repo_path: str,
+        language: Optional[str] = None,
+        timeout: int = 90,
+    ):
+        self.target_repo_path = os.path.abspath(target_repo_path)
+        self.evaluator = BenchmarkEvaluator(
+            target_repo_path=self.target_repo_path,
+            language=language,
+            timeout=timeout,
+        )
+
     @staticmethod
-    def _aggregate_leaderboard(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        grouped: Dict[str, List[Dict[str, Any]]] = {}
-        for r in rows:
-            grouped.setdefault(r["model_tested"], []).append(r)
+    def discover_tasks(tasks_dir: str) -> List[str]:
+        """Return packaged task directories containing an instruction.md file."""
+        root = os.path.abspath(tasks_dir)
+        if not os.path.isdir(root):
+            return []
+        return [
+            os.path.join(root, entry)
+            for entry in sorted(os.listdir(root))
+            if os.path.isdir(os.path.join(root, entry))
+            and os.path.isfile(os.path.join(root, entry, "instruction.md"))
+        ]
 
-        board: List[Dict[str, Any]] = []
-        for model, items in grouped.items():
-            total = len(items)
-            solved = sum(1 for x in items if x["passed"])
-            patch_clean = sum(1 for x in items if x["patch_clean"])
-            avg_ms = round(sum(x["llm_latency_ms"] for x in items) / max(1, total), 2)
+    def run(
+        self,
+        task_dirs: Optional[List[str]] = None,
+        models: Optional[List[str]] = None,
+        output_dir: str = "benchmark_results",
+    ) -> Dict[str, Any]:
+        """Evaluate every requested model/task pair and save JSON and Markdown summaries."""
+        selected_tasks = [os.path.abspath(path) for path in (task_dirs or [])]
+        selected_models = [model.strip() for model in (models or []) if model.strip()]
+        if not selected_models:
+            selected_models = ["gemini-2.0-flash"]
 
-            by_category: Dict[str, Dict[str, int]] = {}
-            by_language: Dict[str, Dict[str, int]] = {}
-            for x in items:
-                cat = x.get("category", "unknown")
-                lang = x.get("language", "unknown")
-                by_category.setdefault(cat, {"passed": 0, "total": 0})
-                by_category[cat]["total"] += 1
-                if x["passed"]:
-                    by_category[cat]["passed"] += 1
-                by_language.setdefault(lang, {"passed": 0, "total": 0})
-                by_language[lang]["total"] += 1
-                if x["passed"]:
-                    by_language[lang]["passed"] += 1
-
-            board.append({
-                "model": model,
-                "solved": solved,
+        leaderboard: List[Dict[str, Any]] = []
+        for model_name in selected_models:
+            task_results = [
+                self.evaluator.evaluate_model(model_name=model_name, task_dir=task_dir)
+                for task_dir in selected_tasks
+            ]
+            resolved = sum(1 for result in task_results if result["passed"])
+            total = len(task_results)
+            failures: Dict[str, int] = {}
+            for result in task_results:
+                reason = result["failure_reason"]
+                if reason != "none":
+                    failures[reason] = failures.get(reason, 0) + 1
+            leaderboard.append({
+                "model": model_name,
+                "resolved": resolved,
                 "total": total,
-                "pass_at_1_pct": round((solved / max(1, total)) * 100.0, 1),
-                "clean_patch_rate_pct": round((patch_clean / max(1, total)) * 100.0, 1),
-                "avg_latency_ms": avg_ms,
-                "by_category": by_category,
-                "by_language": by_language,
+                "pass_at_1_pct": round(resolved * 100.0 / total, 2) if total else 0.0,
+                "failure_breakdown": failures,
+                "task_results": task_results,
             })
 
-        return sorted(board, key=lambda b: (-b["pass_at_1_pct"], b["avg_latency_ms"]))
+        report: Dict[str, Any] = {
+            "target_repo": self.target_repo_path,
+            "total_tasks": len(selected_tasks),
+            "leaderboard": leaderboard,
+        }
+        os.makedirs(output_dir, exist_ok=True)
+        with open(os.path.join(output_dir, "leaderboard.json"), "w", encoding="utf-8") as f:
+            json.dump(report, f, indent=2)
+        with open(os.path.join(output_dir, "leaderboard.md"), "w", encoding="utf-8") as f:
+            f.write(self.render_markdown_leaderboard(report))
+        return report
 
     @staticmethod
     def render_markdown_leaderboard(report: Dict[str, Any]) -> str:
+        """Render a compact Markdown table from a batch benchmark report."""
         lines = [
-            "# Frontier AI Benchmark Leaderboard",
+            "# Benchmark Leaderboard",
             "",
-            f"- **Repository:** `{os.path.basename(report['repo_path'])}`",
-            f"- **Tasks Evaluated:** {report['total_tasks']}",
-            f"- **Generated At:** {report['generated_at']}",
-            "",
-            "| Rank | Model | Pass@1 | Solved | Clean Patch Rate | Avg Latency (ms) |",
-            "| :---: | :--- | :---: | :---: | :---: | :---: |",
+            "| Rank | Model | Pass@1 | Resolved | Failures |",
+            "| ---: | --- | ---: | ---: | --- |",
         ]
-        for idx, entry in enumerate(report.get("leaderboard") or [], 1):
+        rows = report.get("leaderboard") or []
+        ranked_rows = sorted(
+            rows,
+            key=lambda entry: -entry.get("pass_at_1_pct", 0),
+        )
+        for rank, entry in enumerate(ranked_rows, start=1):
+            failures = entry.get("failure_breakdown") or {}
+            failure_text = ", ".join(f"{key}: {value}" for key, value in sorted(failures.items())) or "-"
             lines.append(
-                f"| {idx} | `{entry['model']}` | **{entry['pass_at_1_pct']}%** | "
-                f"{entry['solved']}/{entry['total']} | {entry['clean_patch_rate_pct']}% | {entry['avg_latency_ms']} |"
+                f"| {rank} | {entry.get('model', 'unknown')} | "
+                f"{entry.get('pass_at_1_pct', 0)}% | "
+                f"{entry.get('resolved', 0)}/{entry.get('total', 0)} | {failure_text} |"
             )
-        lines.append("")
         return "\n".join(lines)
+
+
+def _print_summary(report: Dict[str, Any]) -> None:
+    """Print a clean terminal scorecard for live hackathon demos."""
+    print(f"\nBenchmark Report ({report['total_tasks']} tasks evaluated)")
+    print("=" * 60)
+    for model, stats in report["models"].items():
+        print(
+            f"Model: {model} | Resolved: {stats['resolved']}/{stats['total']} "
+            f"| Pass@1: {stats['pass_at_1_percent']}%"
+        )
+        if stats["failure_breakdown"]:
+            print(f"  Failures: {stats['failure_breakdown']}")
+    print("=" * 60)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Run Feature 8 Frontier AI Benchmark Harness")
+    parser.add_argument("--repo", required=True, help="Path to target software repository")
+    parser.add_argument("--tasks", default="tasks", help="Root directory containing packaged tasks")
+    parser.add_argument(
+        "--models",
+        nargs="+",
+        default=["claude-3-5-sonnet"],
+        help="Space-separated list of model identifiers to evaluate",
+    )
+    parser.add_argument(
+        "--output",
+        default="benchmark_report.json",
+        help="Output path for the JSON benchmark report",
+    )
+    parser.add_argument("--language", default=None, help="Target Lang Overrided")
+    parser.add_argument("--timeout", type=int, default=90, help="Timeout in seconds per sandbox step")
+    parser.add_argument("--sandbox", choices=["local", "docker"], default="docker", help="Execution sandbox for model written patches")
+    
+    args = parser.parse_args()
+
+    evaluator = BenchmarkEvaluator(target_repo_path=args.repo)
+    summary = evaluator.evaluate_suite(
+        tasks_root_dir=args.tasks,
+        models=args.models,
+        output_report_path=args.output,
+    )
+    _print_summary(summary)
+
+# if __name__ == "__main__":
+#     # Run as: python -m src.benchmark_evaluator --repo ...  (relative imports need -m)
+#     parser = argparse.ArgumentParser(description="Run Feature 8 Frontier AI Benchmark Harness")
+#     parser.add_argument("--repo", required=True, help="Path to target software repository")
+#     parser.add_argument("--tasks", default="tasks", help="Root directory containing packaged tasks")
+#     parser.add_argument(
+#         "--models",
+#         nargs="+",
+#         default=[_DEFAULT_MODEL],
+#         help="Space-separated list of model identifiers to evaluate",
+#     )
+#     parser.add_argument(
+#         "--output",
+#         default="benchmark_report.json",
+#         help="Output path for the JSON benchmark report",
+#     )
+#     parser.add_argument("--language", default=None, help="Target language override")
+#     parser.add_argument("--timeout", type=int, default=90, help="Timeout in seconds per sandbox step")
+#     parser.add_argument(
+#         "--sandbox",
+#         choices=["local", "docker"],
+#         default="docker",
+#         help="Execution sandbox for model-written patches",
+#     )
+#     args = parser.parse_args()
+
+#     evaluator = BenchmarkEvaluator(
+#         target_repo_path=args.repo,
+#         language=args.language,
+#         timeout=args.timeout,
+#         sandbox=args.sandbox,
+#     )
+#     summary = evaluator.evaluate_suite(
+#         tasks_root_dir=args.tasks,
+#         models=args.models,
+#         output_report_path=args.output,
+#     )
+#     _print_summary(summary)

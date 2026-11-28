@@ -9,7 +9,7 @@ import shutil
 import subprocess
 from typing import Any, Dict, List, Optional, Tuple
 
-from .base import BaseLanguageAdapter, DEFAULT_IGNORED_DIRS
+from .base import BaseLanguageAdapter, DEFAULT_IGNORED_DIRS, TestResultMap
 
 
 _RS_USE_RE = re.compile(r"^\s*(?:pub\s+)?use\s+([^;]+);")
@@ -143,19 +143,49 @@ class RustAdapter(BaseLanguageAdapter):
                 encoding="utf-8", errors="replace", timeout=timeout,
             )
             out = res.stdout + "\n" + res.stderr
-            results: Dict[str, str] = {}
-            prefix = "test_feature_patch" if target_test else ""
-            for line in out.splitlines():
-                m = _RS_TEST_LINE_RE.match(line.strip())
-                if m:
-                    tname, st = m.group(1), m.group(2)
-                    key = tname if not prefix else f"{prefix}::{tname}"
-                    results[key] = "passed" if st == "ok" else ("skipped" if st == "ignored" else "failed")
-            return res.returncode, out, results
+            return res.returncode, out, self.parse_test_output(out)
         except subprocess.TimeoutExpired:
             return -1, f"cargo test timed out after {timeout} seconds.", {}
         except Exception as e:
             return -1, f"cargo test failed: {e}", {}
+
+    @staticmethod
+    def parse_test_output(output: str) -> TestResultMap:
+        results = TestResultMap()
+        current_suite = "cargo"
+        reported_count = 0
+        summary_count_found = False
+        for line in output.splitlines():
+            suite_match = re.search(r"\bRunning (.+?) \(", line)
+            if suite_match:
+                current_suite = suite_match.group(1).replace("\\", "/").strip()
+            count_match = re.search(r"\brunning\s+(\d+)\s+tests?\b", line)
+            if count_match:
+                reported_count += int(count_match.group(1))
+                summary_count_found = True
+            match = _RS_TEST_LINE_RE.match(line.strip())
+            if match:
+                test_name, status = match.group(1), match.group(2)
+                test_id = f"{current_suite}::{test_name}"
+                results[test_id] = (
+                    "passed" if status == "ok"
+                    else "skipped" if status == "ignored"
+                    else "failed"
+                )
+        results.discovered_count = (
+            reported_count if summary_count_found else len(results)
+        )
+        if summary_count_found and reported_count != len(results):
+            results.report_error = (
+                f"Cargo reported {reported_count} tests but {len(results)} individual "
+                "test results were parsed."
+            )
+        if re.search(r"^error(?:\[E\d+\])?:|^error: could not compile", output, re.MULTILINE):
+            results.report_error = (
+                (results.report_error + " " if results.report_error else "")
+                + "Cargo reported a compiler/build error."
+            )
+        return results
 
     def is_new_test(self, test_name: str) -> bool:
         norm = (test_name or "").lower().replace("\\\\", "/")
@@ -163,6 +193,17 @@ class RustAdapter(BaseLanguageAdapter):
 
     def is_real_failure(self, code: int, out: str) -> bool:
         return code > 0 and "is not installed in PATH" not in out
+
+    def has_no_tests_evidence(self, exit_code: int, diagnostics: str, results: Dict[str, str]) -> bool:
+        return (
+            exit_code == 0
+            and not results
+            and bool(re.search(r"\brunning\s+0\s+tests?\b", diagnostics, re.IGNORECASE))
+        )
+
+    def canonical_test_id(self, test_id: str) -> str:
+        normalized = super().canonical_test_id(test_id)
+        return normalized.replace("test_feature_patch::test_feature_patch::", "test_feature_patch::")
 
     def get_leakage_regexes(self) -> List[re.Pattern]:
         return [re.compile(r"\b[a-zA-Z0-9_\-./]+\.rs:\d+(?::\d+)?\b", re.IGNORECASE)]
