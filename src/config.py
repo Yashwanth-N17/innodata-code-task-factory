@@ -268,7 +268,7 @@ def call_llm(
         return _record_usage("mock", target_model, prompt_str, _mock_llm_response(prompt_str, sys_prompt_str, **kwargs), t_start)
 
     if target_provider in ("gemini", "google", "google-genai", "google_genai"):
-        api_key = kwargs.get("api_key") or Config.GEMINI_API_KEY or os.getenv("GOOGLE_API_KEY")
+        api_key = kwargs.get("api_key") or Config.GEMINI_API_KEY or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
         if not api_key or (isinstance(api_key, str) and not api_key.strip()):
             raise ValueError("GEMINI_API_KEY is not set. Please set the GEMINI_API_KEY environment variable.")
 
@@ -973,9 +973,40 @@ def _extract_numbered_lines_from_prompt(prompt_str: str, target_file: str) -> Tu
 
 def _build_append_diff(target_file: str, added_lines: List[str], prompt_str: str = "") -> str:
     """Build a valid unified diff inserting/appending lines using exact context from prompt or disk."""
+    is_cpp_header = target_file.lower().endswith((".h", ".hpp", ".hh", ".hxx"))
+
+    def _find_header_guard_idx(lines_list: List[str]) -> Optional[int]:
+        """Return 0-based index of the #pragma once or #define guard line if present."""
+        for idx, txt in enumerate(lines_list):
+            stripped = txt.strip()
+            if stripped == "#pragma once":
+                return idx
+            if stripped.startswith("#ifndef ") and idx + 1 < len(lines_list):
+                nxt = lines_list[idx + 1].strip()
+                if nxt.startswith("#define "):
+                    return idx + 1
+        return None
+
     if prompt_str:
         numbered, truncated = _extract_numbered_lines_from_prompt(prompt_str, target_file)
         if numbered:
+            if is_cpp_header:
+                guard_idx = _find_header_guard_idx([txt for _, txt in numbered])
+                if guard_idx is not None:
+                    ctx_start = max(0, guard_idx - 1)
+                    ctx = numbered[ctx_start : guard_idx + 1]
+                    start_line = ctx[0][0]
+                    orig_count = len(ctx)
+                    new_count = orig_count + len(added_lines)
+                    parts = [
+                        f"--- a/{target_file}",
+                        f"+++ b/{target_file}",
+                        f"@@ -{start_line},{orig_count} +{start_line},{new_count} @@",
+                    ]
+                    parts.extend(" " + txt for _, txt in ctx)
+                    parts.extend("+" + line for line in added_lines)
+                    return "\n".join(parts) + "\n"
+
             if not truncated:
                 ctx = numbered[-2:] if len(numbered) >= 2 else numbered[-1:]
                 start_line = ctx[0][0]
@@ -990,6 +1021,29 @@ def _build_append_diff(target_file: str, added_lines: List[str], prompt_str: str
                 parts.extend("+" + line for line in added_lines)
                 return "\n".join(parts) + "\n"
             else:
+                # For truncated files, prefer appending at EOF on disk so we never split
+                # multi-line import blocks or top-of-file declarations.
+                disk_path_trunc = _find_target_file_on_disk(target_file)
+                if disk_path_trunc and os.path.isfile(disk_path_trunc):
+                    try:
+                        with open(disk_path_trunc, "r", encoding="utf-8", errors="replace") as f:
+                            orig_lines = f.read().splitlines()
+                        if orig_lines:
+                            ctx = orig_lines[-2:] if len(orig_lines) >= 2 else orig_lines[-1:]
+                            start_line = len(orig_lines) - len(ctx) + 1
+                            orig_count = len(ctx)
+                            new_count = orig_count + len(added_lines)
+                            parts = [
+                                f"--- a/{target_file}",
+                                f"+++ b/{target_file}",
+                                f"@@ -{start_line},{orig_count} +{start_line},{new_count} @@",
+                            ]
+                            parts.extend(" " + line for line in ctx)
+                            parts.extend("+" + line for line in added_lines)
+                            return "\n".join(parts) + "\n"
+                    except Exception:
+                        pass
+
                 ctx = numbered[:2]
                 start_line = ctx[0][0]
                 orig_count = len(ctx)
@@ -1009,6 +1063,23 @@ def _build_append_diff(target_file: str, added_lines: List[str], prompt_str: str
             with open(disk_path, "r", encoding="utf-8", errors="replace") as f:
                 orig_lines = f.read().splitlines()
             if orig_lines:
+                if is_cpp_header:
+                    guard_idx = _find_header_guard_idx(orig_lines)
+                    if guard_idx is not None:
+                        ctx_start = max(0, guard_idx - 1)
+                        ctx = orig_lines[ctx_start : guard_idx + 1]
+                        start_line = ctx_start + 1
+                        orig_count = len(ctx)
+                        new_count = orig_count + len(added_lines)
+                        parts = [
+                            f"--- a/{target_file}",
+                            f"+++ b/{target_file}",
+                            f"@@ -{start_line},{orig_count} +{start_line},{new_count} @@",
+                        ]
+                        parts.extend(" " + line for line in ctx)
+                        parts.extend("+" + line for line in added_lines)
+                        return "\n".join(parts) + "\n"
+
                 ctx = orig_lines[-2:] if len(orig_lines) >= 2 else orig_lines[-1:]
                 start_line = len(orig_lines) - len(ctx) + 1
                 orig_count = len(ctx)
@@ -1043,10 +1114,35 @@ def _generate_mock_ts_diff(target_file: str, target_cls: str, archetype: str, pr
     return _build_append_diff(target_file, added, prompt_str=prompt_str)
 
 
-def _generate_mock_ts_test(target_file: str, target_cls: str, archetype: str) -> str:
+def _has_vitest_installed(target_file: str) -> bool:
+    """Check whether a real vitest binary exists in an ancestor node_modules/.bin directory."""
+    disk_path = _find_target_file_on_disk(target_file)
+    if not disk_path:
+        return False
+    cur = os.path.dirname(os.path.abspath(disk_path))
+    for _ in range(8):
+        if os.path.isfile(os.path.join(cur, "node_modules", ".bin", "vitest")):
+            return True
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            break
+        cur = parent
+    return False
+
+
+def _generate_mock_ts_test(target_file: str, target_cls: str, archetype: str, prompt_str: str = "") -> str:
     """Generate a valid TypeScript test file for mock mode."""
     target_file = str(target_file).strip() if target_file else "src/index.ts"
     rel_import = "../" + target_file.lstrip("./")
+    if "vitest" in (prompt_str or "").lower() and _has_vitest_installed(target_file):
+        return (
+            f'import {{ test, expect }} from "vitest";\n'
+            f'import {{ validateFactoryState }} from "{rel_import}";\n\n'
+            f'test("validateFactoryState validates non-empty string", () => {{\n'
+            f'  expect(validateFactoryState("ok")).toBe(true);\n'
+            f'  expect(() => validateFactoryState("  ")).toThrow(/Invalid input/);\n'
+            f'}});\n'
+        )
     return (
         f'import test from "node:test";\n'
         f'import assert from "node:assert/strict";\n'
@@ -1075,11 +1171,10 @@ def _generate_mock_cpp_test(target_file: str, target_cls: str, archetype: str) -
     """Generate a standalone C++ test file for mock mode."""
     target_file = str(target_file).strip() if target_file else "include/feature.h"
     return (
-        f'#include <cassert>\n'
         f'#include "{target_file}"\n\n'
         f'int main() {{\n'
-        f'    assert(validate_factory_state("ok") == true);\n'
-        f'    assert(validate_factory_state("") == false);\n'
+        f'    if (!validate_factory_state("ok")) return 1;\n'
+        f'    if (validate_factory_state("")) return 2;\n'
         f'    return 0;\n'
         f'}}\n'
     )
@@ -1163,7 +1258,7 @@ def _mock_llm_response(prompt: str, system_prompt: str = "", **kwargs) -> str:
 
     def _test_for_lang(is_repair: bool = False) -> str:
         if raw_lang == "typescript":
-            return _generate_mock_ts_test(target_file, target_cls, category)
+            return _generate_mock_ts_test(target_file, target_cls, category, prompt_str=prompt_str)
         if raw_lang == "cpp":
             return _generate_mock_cpp_test(target_file, target_cls, category)
         if raw_lang == "go":
