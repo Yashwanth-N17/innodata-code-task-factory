@@ -2,12 +2,12 @@
 """
 Feature 4: Hidden Acceptance Test Synthesizer.
 
-Generates an isolated pytest test suite (`test_patch.py`) that strictly
+Generates an isolated language-native acceptance test suite that strictly
 enforces the fail-to-pass guarantee (fails on unmodified repo, passes
 with reference solution applied).
 
 Input: Codebase context + instruction.md specification.
-Output: Valid Python pytest file content.
+Output: Valid test source for the selected language adapter.
 """
 
 import ast
@@ -19,7 +19,10 @@ from .config import call_llm
 
 
 class TestAgent:
-    def __init__(self, prompt_template_path: Optional[str] = None):
+    __test__ = False
+
+    def __init__(self, prompt_template_path: Optional[str] = None, language_adapter=None):
+        self.language_adapter = language_adapter
         if not prompt_template_path:
             prompt_template_path = os.path.join(
                 os.path.dirname(__file__), "..", "prompts", "test_prompt.txt"
@@ -28,12 +31,39 @@ class TestAgent:
         with open(prompt_template_path, "r", encoding="utf-8") as f:
             self.system_prompt = f.read()
 
+    def _language_context(self) -> str:
+        if not self.language_adapter:
+            return ""
+        context = self.language_adapter.get_prompt_context()
+        return (
+            f"Target Language: {context['language']}\n"
+            f"Test Framework: {context['test_framework']}\n"
+            f"Test Requirements: {context['test_rules']}"
+        )
+
+    def _system_prompt(self) -> str:
+        if not self.language_adapter or self.language_adapter.language_id == "python":
+            return self.system_prompt
+        context = self.language_adapter.get_prompt_context()
+        return f"""You are a QA engineer creating hidden acceptance tests for a software task.
+Write a comprehensive test suite in the target repository's native language and test framework.
+{context['test_rules']}
+Tests must fail against the unmodified repository and pass after the requested behavior is implemented.
+Do not modify production code. Return only valid test source code without Markdown fences.
+"""
+
+    def _validate_generated_tests(self, code: str) -> None:
+        if not self.language_adapter or self.language_adapter.language_id == "python":
+            self._validate_test_code(code)
+        elif not code or not code.strip():
+            raise ValueError("TestAgent returned an empty response.")
+
     def generate_tests(
         self,
         codebase_context: str,
         instruction_md: str,
     ) -> str:
-        """Generate pytest test cases testing the specification."""
+        """Generate native test cases that check the specification."""
 
         user_prompt = f"""Codebase Context:
 {codebase_context}
@@ -41,21 +71,21 @@ class TestAgent:
 Task Specification (instruction.md):
 {instruction_md}
 
-Write a comprehensive pytest test file that thoroughly tests all acceptance criteria and edge cases.
+{self._language_context()}
+
 The tests MUST fail against the current unpatched codebase, and pass once implemented.
-Return ONLY valid Python pytest code.
 """
 
         raw_output = call_llm(
             prompt=user_prompt,
-            system_prompt=self.system_prompt,
+            system_prompt=self._system_prompt(),
         )
 
         # Clean Markdown fences.
         cleaned = self._clean_markdown_fences(raw_output)
 
         # Validate generated tests.
-        self._validate_test_code(cleaned)
+        self._validate_generated_tests(cleaned)
 
         return cleaned
 
@@ -68,47 +98,51 @@ Return ONLY valid Python pytest code.
         max_retries: int = 3,
     ) -> str:
         """
-        Repair rejected Python test code using bounded retry attempts.
+        Repair rejected test code using bounded retry attempts.
 
         Every retry uses the original codebase context and instructions,
         the rejected test code, and the latest error feedback.
 
-        Syntax validation and test-definition validation are performed
-        on every repaired output.
+        Python outputs receive syntax and test-definition validation on every
+        retry; other language outputs are validated by their sandbox runner.
 
         Actual test execution remains the verifier's responsibility.
         """
 
-        for attempt in range(max_retries):
+        language_context = self._language_context()
+        language_name = self.language_adapter.display_name if self.language_adapter else "Python"
 
+        for attempt in range(max_retries):
             repair_prompt = f"""Codebase Context:
 {codebase_context}
 
 Task Specification (instruction.md):
 {instruction_md}
 
-The following Python test code was previously rejected:
+{language_context}
+
+The following {language_name} test code was previously rejected:
 
 {rejected_tests}
 
 Reason for rejection:
 {error_feedback}
 
-Please correct the test code so that it is valid Python with recognizable
-test definitions (test_ functions or unittest.TestCase classes).
+Please correct the test code so that it is valid {language_name} for the
+repository's configured test framework.
 
-Return ONLY the corrected Python test code.
+Return ONLY the corrected test code.
 """
 
             raw_output = call_llm(
                 prompt=repair_prompt,
-                system_prompt=self.system_prompt,
+                system_prompt=self._system_prompt(),
             )
 
             cleaned = self._clean_markdown_fences(raw_output)
 
             try:
-                self._validate_test_code(cleaned)
+                self._validate_generated_tests(cleaned)
                 return cleaned
 
             except ValueError as exc:
@@ -118,13 +152,13 @@ Return ONLY the corrected Python test code.
 
                 if attempt == max_retries - 1:
                     raise ValueError(
-                        f"TestAgent failed to produce valid Python test code "
+                        f"TestAgent failed to produce valid {language_name} test code "
                         f"after {max_retries} repair attempts. "
                         f"Last error: {error_feedback}"
                     ) from exc
 
         raise ValueError(
-            f"TestAgent failed to produce valid Python test code "
+            f"TestAgent failed to produce valid {language_name} test code "
             f"after {max_retries} repair attempts."
         )
 

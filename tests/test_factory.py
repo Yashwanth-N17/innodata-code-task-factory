@@ -7,17 +7,323 @@ import unittest
 import json
 import os
 import re
+import sys
 import tempfile
 import shutil
+from contextlib import redirect_stdout
+from io import StringIO
 from unittest.mock import patch
 from src.analyzer import CodebaseAnalyzer
 from src.variation_controller import VariationController
 from src.spec_generator import SpecGenerator
 from src.coder_agent import CoderAgent
-from src.config import Config
+from src.config import Config, LLMProviderError
+from src.languages import (
+    PythonAdapter,
+    TestRunEvidence as RunEvidence,
+    TestRunOutcome as RunOutcome,
+)
 from src.packager import TaskPackager
 from src.test_agent import TestAgent
 from src.verifier import VerificationResult
+
+
+class FactoryRepairIntegrationTests(unittest.TestCase):
+    INITIAL_DIFF = "--- a/service.py\n+++ b/service.py\n@@ -1 +1 @@\n-def value():\n+def value(): return 1\n"
+    REPAIRED_DIFF = "--- a/service.py\n+++ b/service.py\n@@ -1 +1 @@\n-def value():\n+def value(): return 2\n"
+    INITIAL_TESTS = "def test_value():\n    assert True\n"
+    REPAIRED_TESTS = "def test_value():\n    assert 2 == 2\n"
+
+    def setUp(self):
+        Config.LLM_PROVIDER = "mock"
+        self.temp_dir = tempfile.mkdtemp()
+        with open(os.path.join(self.temp_dir, "service.py"), "w", encoding="utf-8") as f:
+            f.write("def value():\n    return 0\n")
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    @staticmethod
+    def _verification(
+        *,
+        patch_applied=True,
+        negative_check=True,
+        positive_check=True,
+        patch_log="",
+        positive_log="",
+    ):
+        result = VerificationResult(adapter=PythonAdapter())
+        test_id = "tests.test_feature_patch::test_value"
+        result.step1_baseline_pass = True
+        result.step2_negative_fail = negative_check
+        result.step3_positive_pass = positive_check
+        result.patch_applied_cleanly = patch_applied
+        result.step1_evidence = RunEvidence(
+            outcome=RunOutcome.PASS,
+            discovered_count=1,
+            executed_count=1,
+            passed_count=1,
+            failed_count=0,
+            skipped_count=0,
+            error_count=0,
+            test_results={"tests.test_existing::test_ok": "passed"},
+            exit_code=0,
+        )
+        result.step2_evidence = RunEvidence(
+            outcome=RunOutcome.FAIL if negative_check else RunOutcome.PASS,
+            discovered_count=1,
+            executed_count=1,
+            passed_count=0 if negative_check else 1,
+            failed_count=1 if negative_check else 0,
+            skipped_count=0,
+            error_count=0,
+            test_results={
+                test_id: "failed" if negative_check else "passed",
+            },
+            exit_code=1 if negative_check else 0,
+        )
+        result.step2_failed_test_ids = [test_id] if negative_check else []
+        if patch_applied:
+            result.step3_evidence = RunEvidence(
+                outcome=RunOutcome.PASS if positive_check else RunOutcome.FAIL,
+                discovered_count=1,
+                executed_count=1,
+                passed_count=1 if positive_check else 0,
+                failed_count=0 if positive_check else 1,
+                skipped_count=0,
+                error_count=0,
+                test_results={
+                    test_id: "passed" if positive_check else "failed",
+                },
+                exit_code=0 if positive_check else 1,
+            )
+        result.logs = {
+            "patch_application": patch_log,
+            "step3_positive_check": positive_log,
+        }
+        return result
+
+    def _run_cli_repair(
+        self,
+        initial_verification,
+        repair_failure=False,
+        spec_failure=None,
+        verification_failure=None,
+    ):
+        import run_factory
+
+        verifier = unittest.mock.Mock()
+        verifier.verify.side_effect = (
+            verification_failure
+            if verification_failure is not None
+            else [initial_verification, self._verification()]
+        )
+        packager = unittest.mock.Mock()
+        packager.package.return_value = "temporary-package"
+        spec_generator = unittest.mock.Mock()
+        spec_generator.generate.return_value = "test specification"
+        if spec_failure is not None:
+            spec_generator.generate.side_effect = spec_failure
+
+        coder_llm = patch(
+            "src.coder_agent.call_llm",
+            side_effect=RuntimeError("repair service unavailable") if repair_failure else None,
+            return_value=self.REPAIRED_DIFF,
+        )
+        test_llm = patch("src.test_agent.call_llm", return_value=self.REPAIRED_TESTS)
+
+        with (
+            patch.object(
+                sys,
+                "argv",
+                [
+                    "run_factory.py",
+                    "--repo",
+                    self.temp_dir,
+                    "--output",
+                    os.path.join(self.temp_dir, "tasks"),
+                    "--count",
+                    "1",
+                    "--mock",
+                ],
+            ),
+            patch("run_factory.resolve_repository", return_value=(
+                self.temp_dir,
+                {"repo_name": "fixture", "commit_hash": ""},
+            )),
+            patch("run_factory.SpecGenerator", return_value=spec_generator),
+            patch("run_factory.CoderAgent.generate_diff", return_value=self.INITIAL_DIFF),
+            patch("run_factory.TestAgent.generate_tests", return_value=self.INITIAL_TESTS),
+            patch("run_factory.SandboxVerifier", return_value=verifier),
+            patch("run_factory.TaskPackager", return_value=packager),
+            coder_llm as coder_llm_mock,
+            test_llm as test_llm_mock,
+        ):
+            with redirect_stdout(StringIO()) as captured:
+                try:
+                    run_factory.main()
+                except SystemExit as exc:
+                    return exc.code, captured.getvalue(), verifier, packager, coder_llm_mock, test_llm_mock
+
+        return None, captured.getvalue(), verifier, packager, coder_llm_mock, test_llm_mock
+
+    def test_cli_repair_branches_invoke_matching_agent_and_reverify(self):
+        scenarios = (
+            (
+                "patch application",
+                self._verification(
+                    patch_applied=False,
+                    positive_check=False,
+                    patch_log="Patch failed to apply",
+                ),
+                "coder",
+            ),
+            (
+                "step 3 test-side failure",
+                self._verification(
+                    positive_check=False,
+                    positive_log="tests/test_feature_patch.py ImportError: missing module",
+                ),
+                "tester",
+            ),
+            (
+                "step 3 verification failure",
+                self._verification(
+                    positive_check=False,
+                    positive_log="AssertionError: expected 1",
+                ),
+                "coder",
+            ),
+            (
+                "step 2 unexpectedly passes",
+                self._verification(negative_check=False),
+                "tester",
+            ),
+        )
+
+        for label, initial, expected_agent in scenarios:
+            with self.subTest(branch=label):
+                exit_code, output, verifier, _, coder_llm, test_llm = self._run_cli_repair(initial)
+                self.assertIsNone(exit_code, output)
+                self.assertEqual(verifier.verify.call_count, 2)
+                if expected_agent == "coder":
+                    coder_llm.assert_called_once()
+                    test_llm.assert_not_called()
+                    self.assertIn(self.INITIAL_DIFF, coder_llm.call_args.kwargs["prompt"])
+                else:
+                    test_llm.assert_called_once()
+                    coder_llm.assert_not_called()
+                    self.assertIn(self.INITIAL_TESTS, test_llm.call_args.kwargs["prompt"])
+
+    def test_cli_keeps_repair_generation_failure_unsuccessful(self):
+        initial = self._verification(
+            patch_applied=False,
+            positive_check=False,
+            patch_log="Patch failed to apply",
+        )
+        exit_code, output, verifier, packager, coder_llm, test_llm = self._run_cli_repair(
+            initial,
+            repair_failure=True,
+        )
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("Repair generation failed", output)
+        self.assertIn("TASK GENERATION FAILURE", output)
+        self.assertNotIn("FAILED VERIFICATION", output)
+        coder_llm.assert_called_once()
+        test_llm.assert_not_called()
+        self.assertEqual(verifier.verify.call_count, 1)
+        self.assertFalse(packager.package.call_args.kwargs["verification"].is_valid)
+
+    def test_cli_classifies_provider_and_generation_failures_before_verification(self):
+        class GeminiUnavailable(Exception):
+            code = 503
+
+        provider_error = LLMProviderError(
+            "gemini",
+            "gemini-test",
+            GeminiUnavailable("credential=secret prompt=private"),
+            attempts=4,
+        )
+        cases = (
+            (provider_error, "PROVIDER FAILURE"),
+            (RuntimeError("private generation details"), "TASK GENERATION FAILURE"),
+        )
+        for error, expected_status in cases:
+            with self.subTest(status=expected_status):
+                exit_code, output, verifier, _, _, _ = self._run_cli_repair(
+                    self._verification(),
+                    spec_failure=error,
+                )
+                self.assertEqual(exit_code, 1)
+                self.assertIn(expected_status, output)
+                self.assertNotIn("FAILED VERIFICATION", output)
+                self.assertNotIn("private generation details", output)
+                self.assertNotIn("credential=secret", output)
+                self.assertNotIn("prompt=private", output)
+                verifier.verify.assert_not_called()
+
+    def test_cli_reports_verifier_exception_as_verification_failure(self):
+        exit_code, output, verifier, _, _, _ = self._run_cli_repair(
+            self._verification(),
+            verification_failure=RuntimeError("private verification details"),
+        )
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("VERIFICATION FAILURE", output)
+        self.assertNotIn("FAILED VERIFICATION", output)
+        self.assertNotIn("private verification details", output)
+        verifier.verify.assert_called_once()
+
+    def test_cli_summary_reports_failed_provider_attempts(self):
+        import run_factory
+
+        with patch(
+            "run_factory.get_usage_stats",
+            return_value={
+                "total_calls": 1,
+                "successful_calls": 0,
+                "failed_calls": 1,
+                "total_attempts": 4,
+                "total_latency_ms": 1200.0,
+                "est_input_tokens": 10,
+                "est_output_tokens": 0,
+            },
+        ):
+            _, output, _, _, _, _ = self._run_cli_repair(
+                self._verification(),
+                spec_failure=RuntimeError("provider failed"),
+            )
+
+        self.assertIn("LLM Requests    : 4 attempts", output)
+        self.assertIn("0 successful calls, 1 failed calls", output)
+
+    def test_cli_allows_generated_test_verification_with_no_existing_tests(self):
+        initial = self._verification(
+            patch_applied=False,
+            positive_check=False,
+            patch_log="Patch failed to apply",
+        )
+        initial.step1_baseline_pass = False
+        initial.step1_evidence = RunEvidence(
+            outcome=RunOutcome.NO_TESTS_FOUND,
+            discovered_count=0,
+            executed_count=0,
+            passed_count=0,
+            failed_count=0,
+            skipped_count=0,
+            error_count=0,
+            exit_code=0,
+            diagnostics="No existing tests found.",
+        )
+
+        exit_code, output, verifier, _, coder_llm, test_llm = self._run_cli_repair(initial)
+
+        self.assertIsNone(exit_code, output)
+        self.assertIn("Baseline] No existing tests found", output)
+        self.assertEqual(verifier.verify.call_count, 2)
+        coder_llm.assert_called_once()
+        test_llm.assert_not_called()
 
 
 class TestFactoryComponents(unittest.TestCase):
@@ -514,6 +820,25 @@ class TestTestAgent(unittest.TestCase):
         self.assertIn("test_apply_valid_voucher", result)
         self.assertIn("test_invalid_voucher_raises", result)
 
+    def test_generate_tests_uses_non_python_adapter_rules(self):
+        from src.languages.typescript import TypeScriptAdapter
+
+        native_tests = (
+            'import test from "node:test";\n'
+            'import assert from "node:assert/strict";\n'
+            'test("feature works", () => assert.equal(1, 1));\n'
+        )
+        agent = TestAgent(language_adapter=TypeScriptAdapter())
+        with patch("src.test_agent.call_llm", return_value=native_tests) as mocked_llm:
+            result = agent.generate_tests("context", "instruction")
+
+        self.assertEqual(result, native_tests)
+        self.assertIn("Target Language: TypeScript", mocked_llm.call_args.kwargs["prompt"])
+        self.assertIn(
+            "tests/test_feature_patch.test.ts",
+            mocked_llm.call_args.kwargs["system_prompt"],
+        )
+
 
 class TestCoderAgentRepair(unittest.TestCase):
     """Tests for CoderAgent.repair_diff()."""
@@ -706,11 +1031,25 @@ class TestTaskPackager(unittest.TestCase):
         self.temp_dir = tempfile.mkdtemp()
         self.packager = TaskPackager(self.temp_dir)
 
-        self.verification = VerificationResult()
+        self.verification = VerificationResult(adapter=PythonAdapter())
         self.verification.step1_baseline_pass = True
         self.verification.step2_negative_fail = True
         self.verification.step3_positive_pass = True
         self.verification.patch_applied_cleanly = True
+        test_id = "tests.test_feature_patch::test_foo"
+        self.verification.step1_evidence = RunEvidence(
+            RunOutcome.PASS, 1, 1, 1, 0, 0, 0,
+            {"tests.test_existing::test_ok": "passed"},
+        )
+        self.verification.step2_evidence = RunEvidence(
+            RunOutcome.FAIL, 1, 1, 0, 1, 0, 0,
+            {test_id: "failed"}, exit_code=1,
+        )
+        self.verification.step3_evidence = RunEvidence(
+            RunOutcome.PASS, 1, 1, 1, 0, 0, 0,
+            {test_id: "passed"},
+        )
+        self.verification.step2_failed_test_ids = [test_id]
         self.verification.logs = {}
 
     def tearDown(self):
@@ -761,6 +1100,29 @@ class TestTaskPackager(unittest.TestCase):
             self.assertTrue(report["checks"]["step1_baseline_pass"])
             self.assertTrue(report["checks"]["step2_negative_fail"])
             self.assertTrue(report["checks"]["step3_positive_pass"])
+
+    def test_boolean_only_verification_is_not_published_as_verified(self):
+        boolean_only = VerificationResult()
+        boolean_only.step1_baseline_pass = True
+        boolean_only.step2_negative_fail = True
+        boolean_only.step3_positive_pass = True
+
+        self.packager.package(
+            task_id="boolean_only",
+            repo_name="myrepo",
+            category="new_feature",
+            instruction_md="# Feature\nAdd foo.",
+            solution_diff="--- a/foo.py\n+++ b/foo.py\n@@ -1,0 +1 @@\n+print('hi')\n",
+            test_code="def test_foo():\n    assert True\n",
+            verification=boolean_only,
+        )
+
+        with open(
+            os.path.join(self.temp_dir, "boolean_only", "validation_report.json"),
+            encoding="utf-8",
+        ) as report_file:
+            report = json.load(report_file)
+        self.assertEqual(report["status"], "FAILED_VERIFICATION")
 
     def test_package_validation_rejects_empty_task_id(self):
         with self.assertRaises(ValueError):

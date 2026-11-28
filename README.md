@@ -111,7 +111,7 @@ pip install -r requirements.txt
 ### 2. Configure Environment
 ```bash
 cp .env.example .env
-# Set your LLM_PROVIDER ('gemini', 'openai', or 'mock') and API Key in .env
+# Set LLM_PROVIDER and the matching API key in .env (or use mock for offline runs)
 ```
 
 ### 3. Run the Factory

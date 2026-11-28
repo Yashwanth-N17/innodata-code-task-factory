@@ -3,10 +3,10 @@
 Feature 6: Standardized Task Packager.
 
 Standardizes and saves verified tasks into SWE-bench compliant task packages:
-- task.toml
+- task.toml (language-calibrated runtime & test command)
 - instruction.md
 - solution/solution.diff
-- tests/test_feature_patch.py
+- Language-native generated acceptance tests
 - validation_report.json
 
 Input: Task artifacts, repo metadata, and verification audit results.
@@ -18,8 +18,9 @@ import os
 import shutil
 import tempfile
 import time
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
+from .languages import BaseLanguageAdapter, PythonAdapter
 from .verifier import VerificationResult
 
 
@@ -38,6 +39,11 @@ class TaskPackager:
         test_code: str,
         verification: VerificationResult,
         overwrite: bool = False,
+        language_adapter: Optional[BaseLanguageAdapter] = None,
+        manifest: Optional[Dict[str, Any]] = None,
+        repo_meta: Optional[Dict[str, str]] = None,
+        rigor_check: Optional[Dict[str, Any]] = None,
+        repo_path: str = "",
     ) -> str:
         """Create a standardized SWE-bench task package directory.
 
@@ -51,7 +57,7 @@ class TaskPackager:
             category: Task category.
             instruction_md: Feature specification markdown.
             solution_diff: Unified git diff patch.
-            test_code: Python test code.
+            test_code: Language-native acceptance test source code.
             verification: VerificationResult from SandboxVerifier.
             overwrite: Whether to replace an existing task directory.
 
@@ -90,11 +96,17 @@ class TaskPackager:
                 "verification must be a VerificationResult instance "
                 f"from src.verifier, got {type(verification).__name__}."
             )
+        verification_valid = verification.is_valid
 
         # Prevent task_id from escaping the output directory.
         if os.path.basename(task_id) != task_id:
             raise ValueError("task_id must be a valid directory name.")
 
+        language_adapter = language_adapter or PythonAdapter()
+        manifest = manifest or {}
+        repo_meta = repo_meta or {}
+        test_file_relpath = language_adapter.test_file_relpath.replace("\\", "/")
+        environment = language_adapter.get_environment_metadata(repo_path, manifest)
         task_dir = os.path.join(self.output_root, task_id)
 
         # ---- Existing directory handling ----
@@ -114,10 +126,10 @@ class TaskPackager:
 
         try:
             solution_dir = os.path.join(staging_dir, "solution")
-            tests_dir = os.path.join(staging_dir, "tests")
+            test_path = os.path.join(staging_dir, *test_file_relpath.split("/"))
 
             os.makedirs(solution_dir, exist_ok=True)
-            os.makedirs(tests_dir, exist_ok=True)
+            os.makedirs(os.path.dirname(test_path), exist_ok=True)
 
             # 1. Write instruction.md
             with open(
@@ -135,9 +147,9 @@ class TaskPackager:
             ) as f:
                 f.write(solution_diff)
 
-            # 3. Write tests/test_feature_patch.py
+            # 3. Write the language adapter's test file.
             with open(
-                os.path.join(tests_dir, "test_feature_patch.py"),
+                test_path,
                 "w",
                 encoding="utf-8",
             ) as f:
@@ -145,21 +157,14 @@ class TaskPackager:
 
             # 4. Write task.toml
             created_at = time.strftime("%Y-%m-%dT%H:%M:%SZ")
-
-            toml_content = f"""# Task Package Configuration
-task_id = "{task_id}"
-repo_name = "{repo_name}"
-category = "{category}"
-created_at = "{created_at}"
-
-[environment]
-python_version = ">=3.9"
-test_command = "pytest tests/test_feature_patch.py"
-
-[evaluation]
-fail_to_pass = ["tests/test_feature_patch.py"]
-pass_to_pass = ["tests/"]
-"""
+            toml_content = language_adapter.format_task_toml(
+                task_id=task_id,
+                repo_name=repo_name,
+                category=category,
+                created_at=created_at,
+                env_meta=environment,
+                repo_meta=repo_meta,
+            )
 
             with open(
                 os.path.join(staging_dir, "task.toml"),
@@ -173,10 +178,13 @@ pass_to_pass = ["tests/"]
                 "task_id": task_id,
                 "repo_name": repo_name,
                 "category": category,
+                "repo_url": repo_meta.get("repo_url", ""),
+                "base_commit": repo_meta.get("commit_hash", ""),
+                "language": language_adapter.language_id,
                 "created_at": created_at,
                 "status": (
                     "VERIFIED"
-                    if verification.is_valid
+                    if verification_valid
                     else "FAILED_VERIFICATION"
                 ),
                 "checks": {
@@ -185,16 +193,15 @@ pass_to_pass = ["tests/"]
                     "step3_positive_pass": verification.step3_positive_pass,
                     "patch_applied_cleanly": verification.patch_applied_cleanly,
                 },
-                "environment": {
-                    "python_version": ">=3.9",
-                    "test_command": "pytest tests/test_feature_patch.py",
-                },
+                "environment": environment,
                 "evaluation": {
-                    "fail_to_pass": ["tests/test_feature_patch.py"],
-                    "pass_to_pass": ["tests/"],
+                    "fail_to_pass": list(verification.fail_to_pass),
+                    "pass_to_pass": list(verification.pass_to_pass),
                 },
                 "logs": verification.logs,
             }
+            if rigor_check is not None:
+                report["rigor_check"] = rigor_check
 
             with open(
                 os.path.join(staging_dir, "validation_report.json"),

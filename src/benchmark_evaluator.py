@@ -1,10 +1,8 @@
 """
-Feature 8: Frontier AI Benchmark Evaluation Harness.
-Hands generated `instruction.md` to a target external AI model (e.g. Claude 3.5 Sonnet, GPT-4o),
-captures its output patch, and evaluates whether the model passes the hidden test suite in the sandbox.
-
-Input: Packaged task directory + target model identifier.
-Output: Evaluation audit dictionary containing solve rate and test logs.
+Feature 8: Frontier AI Benchmark Evaluation & Leaderboard Engine.
+Evaluates external AI models (Claude, GPT-4o/o3-mini, Gemini, DeepSeek, or mock)
+against generated task packages with full codebase context, aggregates Pass@1 solve
+rates by language and archetype, and generates JSON & Markdown leaderboards.
 """
 
 # import os
@@ -81,7 +79,7 @@ except ModuleNotFoundError:
     except ModuleNotFoundError:
         tomllib = None
 
-from .config import call_llm
+from .config import Config, LLMProviderError, call_llm
 from .verifier import SandboxVerifier
 
 try:
@@ -91,11 +89,31 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["BenchmarkEvaluator"]
+__all__ = ["BenchmarkEvaluator", "BatchBenchmarkRunner", "infer_provider"]
 
 # Default retry parameters for LLM API calls
 _DEFAULT_MAX_RETRIES = 3
 _DEFAULT_RETRY_BACKOFF = 2.0  # seconds; doubles each attempt
+
+
+def infer_provider(model_name: str, explicit_provider: Optional[str] = None) -> str:
+    """Choose an LLM provider from a model identifier, honoring an explicit override."""
+    if explicit_provider and explicit_provider.strip():
+        return explicit_provider.strip().lower()
+
+    normalized = (model_name or "").strip().lower()
+    model_id = normalized.rsplit("/", 1)[-1]
+    if "claude" in normalized or normalized.startswith("anthropic/"):
+        return "anthropic"
+    if "gemini" in normalized or normalized.startswith("google/"):
+        return "gemini"
+    if "deepseek" in normalized:
+        return "deepseek"
+    if any(token in model_id for token in ("llama", "mixtral")):
+        return "groq"
+    if model_id.startswith(("gpt-", "o1", "o3", "o4")) or "openai/" in normalized:
+        return "openai"
+    return Config.LLM_PROVIDER
 
 
 class BenchmarkEvaluator:
@@ -104,10 +122,16 @@ class BenchmarkEvaluator:
         task_dir: Optional[str] = None,
         target_repo_path: str = ".",
         prompt_template_path: Optional[str] = None,
+        language: Optional[str] = None,
+        timeout: int = 90,
     ):
         self.task_dir = os.path.abspath(task_dir) if task_dir else None
         self.target_repo_path = os.path.abspath(target_repo_path)
-        self.verifier = SandboxVerifier(self.target_repo_path)
+        self.verifier = SandboxVerifier(
+            self.target_repo_path,
+            language=language,
+            timeout=timeout,
+        )
 
         if not prompt_template_path:
             prompt_template_path = os.path.join(
@@ -202,6 +226,7 @@ class BenchmarkEvaluator:
         user_prompt: str,
         model_name: str,
         system_prompt: Optional[str] = None,
+        provider: Optional[str] = None,
     ) -> str:
         """
         Adaptively call src.config.call_llm() with exponential-backoff retry.
@@ -234,6 +259,8 @@ class BenchmarkEvaluator:
             call_kwargs["model"] = model_name
         elif "model_name" in params:
             call_kwargs["model_name"] = model_name
+        if provider and ("provider" in params or accepts_kwargs):
+            call_kwargs["provider"] = provider
 
         last_exc: Optional[Exception] = None
         for attempt in range(_DEFAULT_MAX_RETRIES):
@@ -241,14 +268,24 @@ class BenchmarkEvaluator:
                 response = call_llm(**call_kwargs)
                 return response if isinstance(response, str) else str(response)
             except Exception as exc:
+                if isinstance(exc, LLMProviderError) and exc.retryable:
+                    raise
                 last_exc = exc
                 if attempt < _DEFAULT_MAX_RETRIES - 1:
                     wait = _DEFAULT_RETRY_BACKOFF * (2 ** attempt)
+                    error_type = (
+                        exc.error_type
+                        if isinstance(exc, LLMProviderError)
+                        else type(exc).__name__
+                    )
+                    status = exc.status if isinstance(exc, LLMProviderError) else None
                     logger.warning(
-                        "LLM call attempt %d/%d failed (%s), retrying in %.1fs…",
+                        "LLM call attempt %d/%d failed (error_type=%s status=%s), "
+                        "retrying in %.1fs",
                         attempt + 1,
                         _DEFAULT_MAX_RETRIES,
-                        exc,
+                        error_type,
+                        status if status is not None else "unknown",
                         wait,
                     )
                     time.sleep(wait)
@@ -329,7 +366,8 @@ class BenchmarkEvaluator:
 
         task_id = os.path.basename(active_task_dir)
         instruction_path = os.path.join(active_task_dir, "instruction.md")
-        test_file_path = os.path.join(active_task_dir, "tests", "test_feature_patch.py")
+        test_relpath = self.verifier.adapter.test_file_relpath
+        test_file_path = os.path.join(active_task_dir, test_relpath)
 
         metadata = self._load_task_metadata(active_task_dir)
         archetype = self._extract_archetype(metadata)
@@ -351,7 +389,7 @@ class BenchmarkEvaluator:
         if not os.path.exists(instruction_path) or not os.path.exists(test_file_path):
             audit["failure_reason"] = "missing_task_files"
             audit["logs"] = {
-                "error": f"Expected instruction.md and tests/test_feature_patch.py inside {active_task_dir}"
+                "error": f"Expected instruction.md and {test_relpath} inside {active_task_dir}"
             }
             return audit
 
@@ -366,11 +404,17 @@ class BenchmarkEvaluator:
         system_prompt, user_prompt = self._build_prompts(repo_context, instruction_md)
 
         start_time = time.perf_counter()
+        provider = (
+            "mock"
+            if Config.LLM_PROVIDER.strip().lower() == "mock"
+            else infer_provider(model_name)
+        )
         try:
             raw_response = self._invoke_model(
                 user_prompt=user_prompt,
                 model_name=model_name,
                 system_prompt=system_prompt,
+                provider=provider,
             )
         except Exception as exc:
             audit["latency_seconds"] = round(time.perf_counter() - start_time, 3)
@@ -485,6 +529,106 @@ class BenchmarkEvaluator:
                 json.dump(report, f, indent=2)
 
         return report
+
+
+class BatchBenchmarkRunner:
+    """Evaluate packaged task suites against model identifiers and write leaderboard reports."""
+
+    def __init__(
+        self,
+        target_repo_path: str,
+        language: Optional[str] = None,
+        timeout: int = 90,
+    ):
+        self.target_repo_path = os.path.abspath(target_repo_path)
+        self.evaluator = BenchmarkEvaluator(
+            target_repo_path=self.target_repo_path,
+            language=language,
+            timeout=timeout,
+        )
+
+    @staticmethod
+    def discover_tasks(tasks_dir: str) -> List[str]:
+        """Return packaged task directories containing an instruction.md file."""
+        root = os.path.abspath(tasks_dir)
+        if not os.path.isdir(root):
+            return []
+        return [
+            os.path.join(root, entry)
+            for entry in sorted(os.listdir(root))
+            if os.path.isdir(os.path.join(root, entry))
+            and os.path.isfile(os.path.join(root, entry, "instruction.md"))
+        ]
+
+    def run(
+        self,
+        task_dirs: Optional[List[str]] = None,
+        models: Optional[List[str]] = None,
+        output_dir: str = "benchmark_results",
+    ) -> Dict[str, Any]:
+        """Evaluate every requested model/task pair and save JSON and Markdown summaries."""
+        selected_tasks = [os.path.abspath(path) for path in (task_dirs or [])]
+        selected_models = [model.strip() for model in (models or []) if model.strip()]
+        if not selected_models:
+            selected_models = ["gemini-2.0-flash"]
+
+        leaderboard: List[Dict[str, Any]] = []
+        for model_name in selected_models:
+            task_results = [
+                self.evaluator.evaluate_model(model_name=model_name, task_dir=task_dir)
+                for task_dir in selected_tasks
+            ]
+            resolved = sum(1 for result in task_results if result["passed"])
+            total = len(task_results)
+            failures: Dict[str, int] = {}
+            for result in task_results:
+                reason = result["failure_reason"]
+                if reason != "none":
+                    failures[reason] = failures.get(reason, 0) + 1
+            leaderboard.append({
+                "model": model_name,
+                "resolved": resolved,
+                "total": total,
+                "pass_at_1_pct": round(resolved * 100.0 / total, 2) if total else 0.0,
+                "failure_breakdown": failures,
+                "task_results": task_results,
+            })
+
+        report: Dict[str, Any] = {
+            "target_repo": self.target_repo_path,
+            "total_tasks": len(selected_tasks),
+            "leaderboard": leaderboard,
+        }
+        os.makedirs(output_dir, exist_ok=True)
+        with open(os.path.join(output_dir, "leaderboard.json"), "w", encoding="utf-8") as f:
+            json.dump(report, f, indent=2)
+        with open(os.path.join(output_dir, "leaderboard.md"), "w", encoding="utf-8") as f:
+            f.write(self.render_markdown_leaderboard(report))
+        return report
+
+    @staticmethod
+    def render_markdown_leaderboard(report: Dict[str, Any]) -> str:
+        """Render a compact Markdown table from a batch benchmark report."""
+        lines = [
+            "# Benchmark Leaderboard",
+            "",
+            "| Rank | Model | Pass@1 | Resolved | Failures |",
+            "| ---: | --- | ---: | ---: | --- |",
+        ]
+        rows = report.get("leaderboard") or []
+        ranked_rows = sorted(
+            rows,
+            key=lambda entry: -entry.get("pass_at_1_pct", 0),
+        )
+        for rank, entry in enumerate(ranked_rows, start=1):
+            failures = entry.get("failure_breakdown") or {}
+            failure_text = ", ".join(f"{key}: {value}" for key, value in sorted(failures.items())) or "-"
+            lines.append(
+                f"| {rank} | {entry.get('model', 'unknown')} | "
+                f"{entry.get('pass_at_1_pct', 0)}% | "
+                f"{entry.get('resolved', 0)}/{entry.get('total', 0)} | {failure_text} |"
+            )
+        return "\n".join(lines)
 
 
 def _print_summary(report: Dict[str, Any]) -> None:

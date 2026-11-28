@@ -10,9 +10,20 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from src.config import (
-    Config, call_llm, _mock_llm_response, _is_transient_error,
-    _execute_with_retry, _generate_mock_diff, _generate_mock_test,
-    _generate_mock_spec, _find_target_file_on_disk
+    Config,
+    LLMProviderError,
+    ProviderConfigurationError,
+    call_llm,
+    get_usage_stats,
+    reset_usage_stats,
+    _safe_error_status,
+    _mock_llm_response,
+    _is_transient_error,
+    _execute_with_retry,
+    _generate_mock_diff,
+    _generate_mock_test,
+    _generate_mock_spec,
+    _find_target_file_on_disk,
 )
 
 
@@ -78,9 +89,11 @@ class TestGeminiProvider(unittest.TestCase):
 
     def setUp(self):
         self.orig_gemini_key = Config.GEMINI_API_KEY
+        self.orig_timeout = Config.LLM_REQUEST_TIMEOUT_SECONDS
 
     def tearDown(self):
         Config.GEMINI_API_KEY = self.orig_gemini_key
+        Config.LLM_REQUEST_TIMEOUT_SECONDS = self.orig_timeout
 
     def test_gemini_missing_api_key_raises_error(self):
         Config.GEMINI_API_KEY = None
@@ -110,7 +123,36 @@ class TestGeminiProvider(unittest.TestCase):
         with patch.dict(sys.modules, modules_patch):
             out = call_llm(prompt="Test prompt", provider="gemini", initial_delay=0.0)
         self.assertEqual(out, "output from gemini")
-        mock_genai.Client.assert_called_once_with(api_key="env_gemini_key_789")
+        mock_genai.Client.assert_called_once_with(
+            api_key="env_gemini_key_789",
+            http_options={"timeout": 60000, "retry_options": {"attempts": 1}},
+        )
+
+    def test_gemini_uses_configurable_llm_timeout(self):
+        Config.LLM_REQUEST_TIMEOUT_SECONDS = 12.5
+        mock_genai = MagicMock()
+        mock_client = MagicMock()
+        mock_genai.Client.return_value = mock_client
+        mock_client.models.generate_content.return_value.text = "response"
+
+        modules_patch = {
+            "google": MagicMock(genai=mock_genai),
+            "google.genai": mock_genai,
+            "google.genai.types": MagicMock(),
+        }
+        with patch.dict(sys.modules, modules_patch):
+            output = call_llm(
+                prompt="timeout configuration",
+                provider="gemini",
+                api_key="test-key",
+                max_retries=0,
+            )
+
+        self.assertEqual(output, "response")
+        mock_genai.Client.assert_called_once_with(
+            api_key="test-key",
+            http_options={"timeout": 12500, "retry_options": {"attempts": 1}},
+        )
 
     def test_gemini_extended_config_kwargs(self):
         Config.GEMINI_API_KEY = "test_key"
@@ -181,7 +223,10 @@ class TestGeminiProvider(unittest.TestCase):
             )
 
         self.assertEqual(out, "Gemini generated patch content")
-        mock_genai.Client.assert_called_once_with(api_key="test_gemini_api_key_123")
+        mock_genai.Client.assert_called_once_with(
+            api_key="test_gemini_api_key_123",
+            http_options={"timeout": 60000, "retry_options": {"attempts": 1}},
+        )
         mock_types.GenerateContentConfig.assert_called_once_with(
             system_instruction="You are a principal engineer.",
             temperature=0.4,
@@ -228,6 +273,277 @@ class TestGeminiProvider(unittest.TestCase):
         with patch.dict(sys.modules, modules_patch):
             out = call_llm(prompt="Test fallback", provider="gemini")
         self.assertEqual(out, "fallback from candidate part")
+
+
+class TestProviderAttemptTelemetry(unittest.TestCase):
+    def setUp(self):
+        self.orig_gemini_key = Config.GEMINI_API_KEY
+        self.orig_retry_limit = Config.LLM_MAX_RETRIES
+        Config.GEMINI_API_KEY = None
+        Config.LLM_MAX_RETRIES = 3
+        reset_usage_stats()
+
+    def tearDown(self):
+        Config.GEMINI_API_KEY = self.orig_gemini_key
+        Config.LLM_MAX_RETRIES = self.orig_retry_limit
+        reset_usage_stats()
+
+    def test_failed_gemini_attempts_are_counted_and_logs_are_sanitized(self):
+        prompt = "private prompt content"
+        credential = "private-test-credential"
+        mock_genai = MagicMock()
+        mock_client = MagicMock()
+        mock_genai.Client.return_value = mock_client
+
+        class GeminiUnavailable(Exception):
+            status_code = 503
+
+        failure = GeminiUnavailable(
+            f"failed credential={credential} prompt={prompt}"
+        )
+        mock_client.models.generate_content.side_effect = failure
+        modules_patch = {
+            "google": MagicMock(genai=mock_genai),
+            "google.genai": mock_genai,
+            "google.genai.types": MagicMock(),
+        }
+
+        with patch.dict(sys.modules, modules_patch):
+            with patch("src.config.time.sleep") as sleep_mock:
+                with patch("src.config.random.uniform", return_value=0.25) as jitter_mock:
+                    with self.assertLogs("src.config", level="WARNING") as captured:
+                        with self.assertRaises(LLMProviderError) as raised:
+                            call_llm(
+                                prompt=prompt,
+                                provider="gemini",
+                                model="test-model",
+                                api_key=credential,
+                            )
+
+        stats = get_usage_stats()
+        self.assertEqual(mock_client.models.generate_content.call_count, 4)
+        self.assertEqual(sleep_mock.call_args_list, [unittest.mock.call(0.25)] * 3)
+        self.assertEqual(jitter_mock.call_count, 3)
+        self.assertEqual(stats["total_attempts"], 4)
+        self.assertEqual(stats["failed_attempts"], 4)
+        self.assertEqual(stats["successful_attempts"], 0)
+        self.assertEqual(stats["total_calls"], 1)
+        self.assertEqual(stats["successful_calls"], 0)
+        self.assertEqual(stats["failed_calls"], 1)
+        self.assertGreaterEqual(stats["total_latency_ms"], stats["total_attempt_latency_ms"])
+        self.assertIs(raised.exception.original_exception, failure)
+        self.assertIs(raised.exception.__cause__, failure)
+
+        log_output = "\n".join(captured.output)
+        self.assertIn("provider=gemini", log_output)
+        self.assertIn("model=test-model", log_output)
+        self.assertIn("attempt=4", log_output)
+        self.assertIn("status=503", log_output)
+        self.assertNotIn(prompt, log_output)
+        self.assertNotIn(credential, log_output)
+        self.assertNotIn(str(failure), log_output)
+
+    def test_error_status_only_returns_allowlisted_codes(self):
+        error = RuntimeError("provider error")
+        error.status = "credential_like_status_value"
+        self.assertIsNone(_safe_error_status(error))
+
+        error.status = "503"
+        self.assertEqual(_safe_error_status(error), 503)
+        error.status = "UNAVAILABLE"
+        self.assertEqual(_safe_error_status(error), "UNAVAILABLE")
+        error.status = "NOT_A_STATUS_CODE"
+        self.assertIsNone(_safe_error_status(error))
+
+    def test_raising_response_property_preserves_error_and_records_attempt(self):
+        class RaisingResponseError(Exception):
+            @property
+            def response(self):
+                raise RuntimeError("response accessor failed")
+
+        failure = RaisingResponseError("original provider failure")
+        mock_genai = MagicMock()
+        mock_client = MagicMock()
+        mock_genai.Client.return_value = mock_client
+        mock_client.models.generate_content.side_effect = failure
+        modules_patch = {
+            "google": MagicMock(genai=mock_genai),
+            "google.genai": mock_genai,
+            "google.genai.types": MagicMock(),
+        }
+
+        with patch.dict(sys.modules, modules_patch):
+            with self.assertRaises(LLMProviderError) as raised:
+                call_llm(
+                    prompt="response getter failure",
+                    provider="gemini",
+                    api_key="test-key",
+                    max_retries=1,
+                )
+
+        self.assertIs(raised.exception.original_exception, failure)
+        self.assertIs(raised.exception.__cause__, failure)
+        stats = get_usage_stats()
+        self.assertEqual(stats["total_calls"], 1)
+        self.assertEqual(stats["failed_calls"], 1)
+        self.assertEqual(stats["total_attempts"], 1)
+        self.assertEqual(stats["failed_attempts"], 1)
+
+    def test_gemini_request_configuration_failure_is_counted(self):
+        mock_genai = MagicMock()
+        mock_types = MagicMock()
+        mock_client = MagicMock()
+        mock_genai.Client.return_value = mock_client
+        mock_genai.types = mock_types
+        mock_types.GenerateContentConfig.side_effect = ValueError(
+            "invalid generation configuration"
+        )
+        modules_patch = {
+            "google": MagicMock(genai=mock_genai),
+            "google.genai": mock_genai,
+            "google.genai.types": mock_types,
+        }
+
+        with patch.dict(sys.modules, modules_patch):
+            with self.assertRaises(ProviderConfigurationError):
+                call_llm(
+                    prompt="invalid request configuration",
+                    provider="gemini",
+                    api_key="test-key",
+                    temperature=0.5,
+                )
+
+        stats = get_usage_stats()
+        self.assertEqual(stats["total_calls"], 1)
+        self.assertEqual(stats["failed_calls"], 1)
+        self.assertEqual(stats["total_attempts"], 0)
+        self.assertEqual(stats["failed_attempts"], 0)
+        mock_client.models.generate_content.assert_not_called()
+
+    def test_invalid_llm_timeout_is_reported_in_telemetry(self):
+        original_timeout = Config.LLM_REQUEST_TIMEOUT_SECONDS
+        Config.LLM_REQUEST_TIMEOUT_SECONDS = "not-a-number"
+        mock_genai = MagicMock()
+        modules_patch = {
+            "google": MagicMock(genai=mock_genai),
+            "google.genai": mock_genai,
+            "google.genai.types": MagicMock(),
+        }
+
+        try:
+            with patch.dict(sys.modules, modules_patch):
+                with self.assertRaises(ProviderConfigurationError):
+                    call_llm(
+                        prompt="invalid timeout",
+                        provider="gemini",
+                        api_key="test-key",
+                    )
+        finally:
+            Config.LLM_REQUEST_TIMEOUT_SECONDS = original_timeout
+
+        stats = get_usage_stats()
+        self.assertEqual(stats["total_calls"], 1)
+        self.assertEqual(stats["failed_calls"], 1)
+        self.assertEqual(stats["total_attempts"], 0)
+        mock_genai.Client.assert_not_called()
+
+    def test_gemini_retry_limit_is_bounded(self):
+        attempts = 0
+
+        def always_unavailable():
+            nonlocal attempts
+            attempts += 1
+            raise RuntimeError("503 UNAVAILABLE")
+
+        with patch("src.config.time.sleep"):
+            with self.assertRaises(RuntimeError):
+                _execute_with_retry(always_unavailable, max_retries=100)
+
+        self.assertEqual(attempts, 6)
+
+    def test_gemini_deadline_error_uses_jittered_retry(self):
+        mock_genai = MagicMock()
+        mock_client = MagicMock()
+        mock_genai.Client.return_value = mock_client
+
+        class GeminiDeadlineExceeded(Exception):
+            status_code = 504
+
+        response = MagicMock()
+        response.text = "recovered"
+        mock_client.models.generate_content.side_effect = [
+            GeminiDeadlineExceeded("deadline exceeded"),
+            response,
+        ]
+        modules_patch = {
+            "google": MagicMock(genai=mock_genai),
+            "google.genai": mock_genai,
+            "google.genai.types": MagicMock(),
+        }
+
+        with patch.dict(sys.modules, modules_patch):
+            with patch("src.config.time.sleep") as sleep_mock:
+                with patch("src.config.random.uniform", return_value=0.3) as jitter_mock:
+                    output = call_llm(
+                        prompt="retry deadline",
+                        provider="gemini",
+                        model="test-model",
+                        api_key="dummy-key",
+                        max_retries=1,
+                        initial_delay=0.5,
+                    )
+
+        self.assertEqual(output, "recovered")
+        self.assertEqual(mock_client.models.generate_content.call_count, 2)
+        sleep_mock.assert_called_once_with(0.3)
+        jitter_mock.assert_called_once_with(0.0, 0.5)
+
+
+class TestOtherProviderTimeoutConfiguration(unittest.TestCase):
+    def setUp(self):
+        self.original_timeout = Config.LLM_REQUEST_TIMEOUT_SECONDS
+        Config.LLM_REQUEST_TIMEOUT_SECONDS = 7.25
+
+    def tearDown(self):
+        Config.LLM_REQUEST_TIMEOUT_SECONDS = self.original_timeout
+
+    def test_anthropic_client_uses_configurable_llm_timeout(self):
+        mock_anthropic = MagicMock()
+        mock_client = mock_anthropic.Anthropic.return_value
+        mock_client.messages.create.return_value.content = [
+            MagicMock(type="text", text="response")
+        ]
+        with patch.dict(sys.modules, {"anthropic": mock_anthropic}):
+            output = call_llm(
+                prompt="timeout configuration",
+                provider="anthropic",
+                api_key="test-key",
+                max_retries=0,
+            )
+
+        self.assertEqual(output, "response")
+        mock_anthropic.Anthropic.assert_called_once_with(
+            api_key="test-key", timeout=7.25, max_retries=0
+        )
+
+    def test_openai_compatible_client_uses_configurable_llm_timeout(self):
+        mock_openai = MagicMock()
+        mock_client = mock_openai.OpenAI.return_value
+        choice = MagicMock()
+        choice.message.content = "response"
+        mock_client.chat.completions.create.return_value.choices = [choice]
+        with patch.dict(sys.modules, {"openai": mock_openai}):
+            output = call_llm(
+                prompt="timeout configuration",
+                provider="openai",
+                api_key="test-key",
+                max_retries=0,
+            )
+
+        self.assertEqual(output, "response")
+        mock_openai.OpenAI.assert_called_once_with(
+            api_key="test-key", timeout=7.25, max_retries=0
+        )
 
 
 class TestOpenAIProvider(unittest.TestCase):
@@ -298,7 +614,9 @@ class TestOpenAIProvider(unittest.TestCase):
             )
 
         self.assertEqual(out, "OpenAI generated code")
-        mock_openai_module.OpenAI.assert_called_once_with(api_key="test_openai_api_key_456")
+        mock_openai_module.OpenAI.assert_called_once_with(
+            api_key="test_openai_api_key_456", timeout=60.0, max_retries=0
+        )
         mock_client.chat.completions.create.assert_called_once_with(
             model="gpt-4o",
             messages=[
@@ -334,6 +652,8 @@ class TestOpenAIProvider(unittest.TestCase):
         self.assertEqual(out, "Custom endpoint response")
         mock_openai_module.OpenAI.assert_called_once_with(
             api_key="groq_key",
+            timeout=60.0,
+            max_retries=0,
             base_url="https://api.groq.com/openai/v1",
         )
 
@@ -359,6 +679,8 @@ class TestOpenAIProvider(unittest.TestCase):
         self.assertEqual(out, "LocalAI result")
         mock_openai_module.OpenAI.assert_called_once_with(
             api_key="local_key",
+            timeout=60.0,
+            max_retries=0,
             base_url="http://localhost:8000/v1",
         )
 
@@ -377,7 +699,9 @@ class TestOpenAIProvider(unittest.TestCase):
             out = call_llm(prompt="Test", provider="openai")
 
         self.assertEqual(out, "Stripped base url")
-        mock_openai_module.OpenAI.assert_called_once_with(api_key="key")
+        mock_openai_module.OpenAI.assert_called_once_with(
+            api_key="key", timeout=60.0, max_retries=0
+        )
 
     def test_openai_choice_text_legacy_fallback(self):
         mock_openai_module = MagicMock()
@@ -548,6 +872,7 @@ class TestRetryLogic(unittest.TestCase):
         sleep_mock.assert_called_once_with(0.1)
 
     def test_call_llm_gemini_transient_retry_success(self):
+        reset_usage_stats()
         mock_genai = MagicMock()
         mock_gemini_client = MagicMock()
         mock_genai.Client.return_value = mock_gemini_client
@@ -575,17 +900,25 @@ class TestRetryLogic(unittest.TestCase):
         }
         with patch.dict(sys.modules, modules_patch):
             with patch("time.sleep") as sleep_mock:
-                out = call_llm(
-                    prompt="Retry test",
-                    provider="gemini",
-                    api_key="test_key",
-                    max_retries=2,
-                    initial_delay=0.1,
-                )
+                with patch("src.config.random.uniform", return_value=0.1) as jitter_mock:
+                    out = call_llm(
+                        prompt="Retry test",
+                        provider="gemini",
+                        api_key="test_key",
+                        max_retries=2,
+                        initial_delay=0.1,
+                    )
 
         self.assertEqual(out, "Gemini retried successfully")
         self.assertEqual(attempts, 2)
         sleep_mock.assert_called_once_with(0.1)
+        jitter_mock.assert_called_once_with(0.0, 0.1)
+        stats = get_usage_stats()
+        self.assertEqual(stats["total_attempts"], 2)
+        self.assertEqual(stats["failed_attempts"], 1)
+        self.assertEqual(stats["successful_attempts"], 1)
+        self.assertEqual(stats["successful_calls"], 1)
+        self.assertEqual(stats["failed_calls"], 0)
 
     def test_execute_with_retry_negative_clamping(self):
         call_count = 0
@@ -637,6 +970,19 @@ class TestRetryLogic(unittest.TestCase):
 
 class TestDynamicMockEngine(unittest.TestCase):
     """Test dynamic mock engine for archetypes, repair loops, and BenchmarkEvaluator."""
+
+    def setUp(self):
+        self.orig_provider = Config.LLM_PROVIDER
+        self.orig_gemini_key = Config.GEMINI_API_KEY
+        self.orig_openai_key = Config.OPENAI_API_KEY
+        Config.LLM_PROVIDER = "mock"
+        Config.GEMINI_API_KEY = None
+        Config.OPENAI_API_KEY = None
+
+    def tearDown(self):
+        Config.LLM_PROVIDER = self.orig_provider
+        Config.GEMINI_API_KEY = self.orig_gemini_key
+        Config.OPENAI_API_KEY = self.orig_openai_key
 
     def test_archetype_new_feature(self):
         # Spec generation
@@ -1016,6 +1362,7 @@ The `MethodSignature` in `analyzer.py` needs changes.
 
     def test_model_and_provider_whitespace_fallback(self):
         # Provider whitespace fallback
+        Config.LLM_PROVIDER = "mock"
         res = call_llm("prompt", provider="   ")
         self.assertIsInstance(res, str)
 
@@ -1029,6 +1376,21 @@ The `MethodSignature` in `analyzer.py` needs changes.
             call_llm("test prompt", provider="openai", model="   ", api_key="dummy")
             called_model = mock_client.chat.completions.create.call_args[1]["model"]
         self.assertEqual(called_model, Config.MODEL_NAME)
+
+    def test_whitespace_provider_falls_back_to_configured_provider(self):
+        Config.LLM_PROVIDER = "openai"
+        mock_openai = MagicMock()
+        mock_client = MagicMock()
+        mock_openai.OpenAI.return_value = mock_client
+        mock_client.chat.completions.create.return_value = MagicMock(
+            choices=[MagicMock(message=MagicMock(content="configured openai fallback"))]
+        )
+
+        with patch.dict(sys.modules, {"openai": mock_openai}):
+            res = call_llm("test prompt", provider="   ", api_key="dummy")
+
+        self.assertEqual(res, "configured openai fallback")
+        mock_openai.OpenAI.assert_called_once()
 
     def test_find_target_file_on_disk_none(self):
         self.assertIsNone(_find_target_file_on_disk(None))
@@ -1194,15 +1556,30 @@ The `MethodSignature` in `analyzer.py` needs changes.
         # Test Groq default endpoint routing
         with patch.dict(sys.modules, {"openai": mock_openai}):
             with patch.dict(os.environ, {"GROQ_API_KEY": "groq_secret"}):
-                res = call_llm("Groq fast prompt", provider="groq")
+                with patch.object(Config, "GROQ_MODEL_NAME", "llama-test-model"):
+                    res = call_llm("Groq fast prompt", provider="groq")
         self.assertEqual(res, "Groq response")
-        mock_openai.OpenAI.assert_called_with(api_key="groq_secret", base_url="https://api.groq.com/openai/v1")
+        mock_openai.OpenAI.assert_called_with(
+            api_key="groq_secret",
+            timeout=60.0,
+            max_retries=0,
+            base_url="https://api.groq.com/openai/v1",
+        )
+        self.assertEqual(
+            mock_client.chat.completions.create.call_args.kwargs["model"],
+            "llama-test-model",
+        )
 
         # Test Ollama local default endpoint routing (no API key required)
         with patch.dict(sys.modules, {"openai": mock_openai}):
             res_ollama = call_llm("Ollama prompt", provider="ollama")
         self.assertEqual(res_ollama, "Groq response")
-        mock_openai.OpenAI.assert_called_with(api_key="dummy_local_key", base_url="http://localhost:11434/v1")
+        mock_openai.OpenAI.assert_called_with(
+            api_key="dummy_local_key",
+            timeout=60.0,
+            max_retries=0,
+            base_url="http://localhost:11434/v1",
+        )
 
     def test_mock_diff_absolute_path_handling(self):
         diff = _generate_mock_diff("/tmp/project/src/service.py", "PaymentProcessor", "new_feature")

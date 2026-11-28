@@ -81,7 +81,7 @@ class VariationController:
         self._history = []
         self._variant_history = []
 
-    def select_category(self, count: int = 1) -> List[Dict[str, str]]:
+    def select_category(self, count: int = 1, language: str = "python") -> List[Dict[str, str]]:
         """Select a balanced set of diverse categories for task generation.
         Each returned dict keeps the original keys (id, name, description) and adds
         'variant': the concrete sub-type this task should focus on."""
@@ -90,11 +90,35 @@ class VariationController:
             category = self._least_used_category()
             variant = self._least_used_variant(category["id"])
             entry = dict(category)
-            entry["variant"] = variant
+            entry["variant"] = self.adapt_variant_for_language(variant, language)
             selected.append(entry)
             self._history.append(category["id"])
             self._variant_history.append((category["id"], variant))
         return selected
+
+    @staticmethod
+    def adapt_variant_for_language(variant: str, language: str = "python") -> str:
+        """Translate Python-centric terms in variants to idiomatic equivalents for other languages."""
+        lang = (language or "python").lower()
+        if lang == "typescript":
+            return (
+                variant.replace("None", "null/undefined")
+                .replace("(dict or set)", "(Map or Set)")
+                .replace("mutable default arguments", "shared mutable module/closure state")
+            )
+        if lang == "cpp":
+            return (
+                variant.replace("None and wrong-type", "null/empty and invalid")
+                .replace("explicit exceptions", "explicit std::invalid_argument / std::out_of_range exceptions")
+                .replace("(dict or set)", "(std::unordered_map or std::unordered_set)")
+                .replace("mutable default arguments", "static/shared mutable state")
+            )
+        if lang in ("go", "rust", "java"):
+            return (
+                variant.replace("None", "nil/null/None")
+                .replace("(dict or set)", "(hash map or hash set)")
+            )
+        return variant
 
     def _least_used_category(self) -> Dict[str, str]:
         # min() returns the first minimum, so ties follow TAXONOMY order.

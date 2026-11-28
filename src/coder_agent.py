@@ -1,11 +1,9 @@
 
 """
 Feature 3: Ground-Truth Reference Coder & Self-Repair Agent.
-Generates the reference solution formatted strictly as a unified Git diff (`solution.diff`).
-Includes an iterative self-repair loop to fix rejected patches or test failures.
-
-Input: Codebase context + instruction.md specification.
-Output: Valid unified Git diff patch string.
+Generates the reference solution formatted strictly as a unified Git diff (`solution.diff`)
+for any supported language. Includes an iterative self-repair loop to fix rejected patches
+or build/test failures.
 """
 
 import os
@@ -15,7 +13,8 @@ from .config import call_llm
 
 
 class CoderAgent:
-    def __init__(self, prompt_template_path: Optional[str] = None):
+    def __init__(self, prompt_template_path: Optional[str] = None, language_adapter=None):
+        self.language_adapter = language_adapter
         if not prompt_template_path:
             prompt_template_path = os.path.join(
                 os.path.dirname(__file__), "..", "prompts", "coder_prompt.txt"
@@ -23,6 +22,12 @@ class CoderAgent:
 
         with open(prompt_template_path, "r", encoding="utf-8") as f:
             self.system_prompt = f.read()
+
+    def _lang_hint(self) -> str:
+        if not self.language_adapter:
+            return "Language: Python\nRules: Ensure all imports, syntax, and typing are 100% valid Python."
+        ctx = self.language_adapter.get_prompt_context()
+        return f"Target Language: {ctx['language']}\nRules: {ctx['coder_rules']}"
 
     def generate_diff(self, codebase_context: str, instruction_md: str) -> str:
         """Generate unified git diff reference solution."""
@@ -32,6 +37,8 @@ class CoderAgent:
 
 Task Specification (instruction.md):
 {instruction_md}
+
+{self._lang_hint()}
 
 Please generate the reference implementation that satisfies this specification.
 Return ONLY the unified git diff patch.
@@ -75,6 +82,8 @@ Return ONLY the unified git diff patch.
 
 Task Specification (instruction.md):
 {instruction_md}
+
+{self._lang_hint()}
 
 The following unified git diff was previously rejected:
 
