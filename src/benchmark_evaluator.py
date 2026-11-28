@@ -209,9 +209,8 @@ class BenchmarkEvaluator:
                 .replace("{instruction_md}", instruction_md)
             )
             system_prompt = (
-                "# FEATURE: Feature 8 - Frontier AI Benchmark Evaluator\n"
-                "# LOADED BY: src/benchmark_evaluator.py\n"
-                "You are an expert software engineer. Follow the specification and output ONLY a valid unified Git diff."
+                "You are an expert software engineer. "
+                "Follow the specification and output ONLY a valid unified Git diff."
             )
             return system_prompt, rendered
 
@@ -268,7 +267,7 @@ class BenchmarkEvaluator:
                 response = call_llm(**call_kwargs)
                 return response if isinstance(response, str) else str(response)
             except Exception as exc:
-                if isinstance(exc, LLMProviderError) and exc.retryable:
+                if isinstance(exc, LLMProviderError) and not exc.retryable:
                     raise
                 last_exc = exc
                 if attempt < _DEFAULT_MAX_RETRIES - 1:
@@ -374,7 +373,7 @@ class BenchmarkEvaluator:
 
         # Base audit structure (preserves original starter keys for compatibility)
         audit: Dict[str, Any] = {
-            "model_tested": model_name,
+            "model_tested":model_name, #the name of the model to be tested, gpt sol, fable, or even hydrogen if APi key is there
             "task_id": task_id,
             "archetype": archetype,
             "passed": False,
@@ -660,6 +659,10 @@ if __name__ == "__main__":
         default="benchmark_report.json",
         help="Output path for the JSON benchmark report",
     )
+    parser.add_argument("--language", default=None, help="Target Lang Overrided")
+    parser.add_argument("--timeout", type=int, default=90, help="Timeout in seconds per sandbox step")
+    parser.add_argument("--sandbox", choices=["local", "docker"], default="docker", help="Execution sandbox for model written patches")
+    
     args = parser.parse_args()
 
     evaluator = BenchmarkEvaluator(target_repo_path=args.repo)
@@ -669,3 +672,42 @@ if __name__ == "__main__":
         output_report_path=args.output,
     )
     _print_summary(summary)
+
+# if __name__ == "__main__":
+#     # Run as: python -m src.benchmark_evaluator --repo ...  (relative imports need -m)
+#     parser = argparse.ArgumentParser(description="Run Feature 8 Frontier AI Benchmark Harness")
+#     parser.add_argument("--repo", required=True, help="Path to target software repository")
+#     parser.add_argument("--tasks", default="tasks", help="Root directory containing packaged tasks")
+#     parser.add_argument(
+#         "--models",
+#         nargs="+",
+#         default=[_DEFAULT_MODEL],
+#         help="Space-separated list of model identifiers to evaluate",
+#     )
+#     parser.add_argument(
+#         "--output",
+#         default="benchmark_report.json",
+#         help="Output path for the JSON benchmark report",
+#     )
+#     parser.add_argument("--language", default=None, help="Target language override")
+#     parser.add_argument("--timeout", type=int, default=90, help="Timeout in seconds per sandbox step")
+#     parser.add_argument(
+#         "--sandbox",
+#         choices=["local", "docker"],
+#         default="docker",
+#         help="Execution sandbox for model-written patches",
+#     )
+#     args = parser.parse_args()
+
+#     evaluator = BenchmarkEvaluator(
+#         target_repo_path=args.repo,
+#         language=args.language,
+#         timeout=args.timeout,
+#         sandbox=args.sandbox,
+#     )
+#     summary = evaluator.evaluate_suite(
+#         tasks_root_dir=args.tasks,
+#         models=args.models,
+#         output_report_path=args.output,
+#     )
+#     _print_summary(summary)

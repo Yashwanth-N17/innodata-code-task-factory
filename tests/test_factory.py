@@ -600,7 +600,8 @@ def test_standalone_execution():
         tester = TestAgent()
 
         # Verify repair methods exist and return strings
-        diff = coder.repair_diff(codebase_context="ctx", instruction_md="spec", rejected_diff="diff", error_feedback="err")
+        diff = coder.repair_diff(codebase_context="ctx", instruction_md="spec", rejected_diff="diff", error_feedback="err") 
+        # bug was from parameter names being different from what was linked in coder_agent.py
         self.assertTrue(isinstance(diff, str))
 
         tests = tester.repair_tests(codebase_context="ctx", instruction_md="spec", rejected_tests="tests", error_feedback="err")
